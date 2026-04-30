@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KKTR Data Migration</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #1a2e1a; min-height: 100vh;
+           display: flex; align-items: center; justify-content: center; padding: 20px; }
+    .card { background: white; border-radius: 16px; padding: 24px; max-width: 420px;
+            width: 100%; box-shadow: 0 8px 40px rgba(0,0,0,0.4); }
+    h1 { color: #1a2e1a; font-size: 1.1rem; margin-bottom: 6px; }
+    .sub { color: #888; font-size: 0.82rem; margin-bottom: 20px; line-height: 1.5; }
+    .step { background: #f0ebe0; border-radius: 10px; padding: 14px; margin-bottom: 10px;
+            border-left: 4px solid #C8951A; }
+    .step-title { font-weight: 700; color: #1a2e1a; font-size: 0.9rem; margin-bottom: 4px; }
+    .step-desc { color: #666; font-size: 0.78rem; line-height: 1.5; }
+    .log { background: #0d1a0d; color: #4ade80; border-radius: 10px; padding: 14px;
+           font-family: monospace; font-size: 0.75rem; min-height: 120px; max-height: 220px;
+           overflow-y: auto; margin: 14px 0; white-space: pre-wrap; }
+    .log .err { color: #f87171; }
+    .log .warn { color: #fbbf24; }
+    .log .ok { color: #4ade80; }
+    button { width: 100%; padding: 12px; border: none; border-radius: 10px;
+             font-family: inherit; font-weight: 700; font-size: 0.9rem; cursor: pointer;
+             margin-top: 6px; transition: all 0.15s; }
+    .btn-primary { background: #1a2e1a; color: white; }
+    .btn-primary:disabled { background: #aaa; cursor: not-allowed; }
+    .btn-danger { background: #c0392b; color: white; margin-top: 10px; }
+    .count-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 12px 0; }
+    .count-box { background: #e8f5e9; border-radius: 8px; padding: 10px; text-align: center; }
+    .count-box .num { font-size: 1.4rem; font-weight: 800; color: #1a2e1a; }
+    .count-box .lbl { font-size: 0.68rem; color: #666; text-transform: uppercase; }
+    .warn-box { background: #fff8e7; border: 1.5px solid #C8951A; border-radius: 10px;
+                padding: 12px; margin-bottom: 14px; font-size: 0.8rem; color: #8B5E3C;
+                line-height: 1.6; }
+  </style>
+</head>
+<body>
+<div class="card">
+  <h1>🪵 KKTR — Data Migration Tool</h1>
+  <p class="sub">Moves Abraham's stored records from this phone into Firebase so all devices can see the data.</p>
+
+  <div class="warn-box">
+    ⚠️ <strong>Run this on Abraham's phone only</strong> — the phone that has all the old records. Open this page in the same browser he used before.
+  </div>
+
+  <div id="scan-section">
+    <button class="btn-primary" onclick="scanData()">🔍 Step 1: Scan Local Data</button>
+  </div>
+
+  <div id="found-section" style="display:none">
+    <div class="count-grid" id="counts"></div>
+    <button class="btn-primary" id="migrate-btn" onclick="startMigration()">
+      🚀 Step 2: Migrate to Firebase
+    </button>
+  </div>
+
+  <div class="log" id="log">Tap "Scan Local Data" to begin...\n</div>
+
+  <div id="done-section" style="display:none">
+    <div style="text-align:center; padding:16px 0">
+      <div style="font-size:2.5rem; margin-bottom:8px">✅</div>
+      <div style="font-weight:800; color:#1a2e1a; font-size:1rem; margin-bottom:6px">Migration Complete!</div>
+      <div style="color:#888; font-size:0.82rem; line-height:1.6">
+        All records are now in Firebase.<br>
+        Every device will see Abraham's data.<br>
+        You can close this page.
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+  import { getFirestore, collection, addDoc, serverTimestamp, getDocs, query, where }
+    from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+  import { getAuth, signInWithEmailAndPassword }
+    from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyB_uu4v8liarwbNFPb9yHO-wzLIDBwEBG4",
+    authDomain: "kktr-stores.firebaseapp.com",
+    databaseURL: "https://kktr-stores-default-rtdb.firebaseio.com",
+    projectId: "kktr-stores",
+    storageBucket: "kktr-stores.firebasestorage.app",
+    messagingSenderId: "1038445014414",
+    appId: "1:1038445014414:web:eb63565ba729854b1588df"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+  const auth = getAuth(app);
+
+  const log = (msg, type="ok") => {
+    const el = document.getElementById("log");
+    const cls = type==="err"?"err":type==="warn"?"warn":"ok";
+    el.innerHTML += `<span class="${cls}">${msg}</span>\n`;
+    el.scrollTop = el.scrollHeight;
+  };
+
+  // ─── READ LOCAL STORAGE ──────────────────────────────────────────────────
+  const LS = {
+    get: (k, d) => {
+      try {
+        // Try both old key formats
+        const keys = [k, k.replace("kktr_",""), "kktr_v2_"+k.replace("kktr_","")];
+        for (const key of keys) {
+          const v = localStorage.getItem(key);
+          if (v) return JSON.parse(v);
+        }
+        return d;
+      } catch { return d; }
+    }
+  };
+
+  const toTS = (dateStr) => {
+    if (!dateStr) return null;
+    try { return new Date(dateStr); } catch { return null; }
+  };
+
+  let scannedData = null;
+
+  window.scanData = function() {
+    log("Scanning local storage...");
+    const lubeTx    = LS.get("kktr_lube_tx", []);
+    const storeTx   = LS.get("kktr_store_tx", []);
+    const reqs      = LS.get("kktr_reqs", []);
+    const recs      = LS.get("kktr_recs", []);
+    const receipts  = LS.get("kktr_receipts", []);
+    const lubes     = LS.get("kktr_lubes", []);
+    const lubeStock = LS.get("kktr_lube_stock", []);
+    const storeItems= LS.get("kktr_store_items", []);
+    const storeStock= LS.get("kktr_store_stock", []);
+
+    log(`Found ${lubeTx.length} lubricant transactions`);
+    log(`Found ${storeTx.length} store transactions`);
+    log(`Found ${reqs.length} requisitions`);
+    log(`Found ${receipts.length} receipts`);
+    log(`Found ${lubes.length} lubricant types`);
+    log(`Found ${storeItems.length} store items`);
+
+    const total = lubeTx.length+storeTx.length+reqs.length+receipts.length+
+                  lubes.length+storeItems.length;
+
+    if (total === 0) {
+      log("⚠ No local data found. Either data is already migrated,", "warn");
+      log("  or this is not Abraham's original phone.", "warn");
+      return;
+    }
+
+    scannedData = { lubeTx, storeTx, reqs, recs, receipts, lubes, lubeStock, storeItems, storeStock };
+
+    // Show counts
+    document.getElementById("counts").innerHTML = `
+      <div class="count-box"><div class="num">${lubeTx.length}</div><div class="lbl">Lube Txns</div></div>
+      <div class="count-box"><div class="num">${storeTx.length}</div><div class="lbl">Store Txns</div></div>
+      <div class="count-box"><div class="num">${reqs.length}</div><div class="lbl">Requisitions</div></div>
+      <div class="count-box"><div class="num">${lubes.length+storeItems.length}</div><div class="lbl">Items</div></div>
+    `;
+    document.getElementById("found-section").style.display = "block";
+    log("✅ Scan complete. Tap Migrate to upload to Firebase.", "ok");
+  };
+
+  window.startMigration = async function() {
+    if (!scannedData) return;
+
+    const btn = document.getElementById("migrate-btn");
+    btn.disabled = true;
+    btn.textContent = "⏳ Migrating... please wait";
+
+    log("\n── Connecting to Firebase ──");
+
+    // Sign in as admin silently (just for write access)
+    try {
+      await signInWithEmailAndPassword(auth, "abraham.sackey@kktr.store", "Stores@2024");
+      log("Connected to Firebase ✓");
+    } catch(e) {
+      log("Auth note: "+e.message+" — trying without auth", "warn");
+    }
+
+    const { lubeTx, storeTx, reqs, receipts, lubes, lubeStock, storeItems, storeStock } = scannedData;
+    let migrated = 0;
+    let skipped = 0;
+
+    // ── 1. MIGRATE LUBRICANTS ──────────────────────────────────────────────
+    log("\n── Migrating Lubricants ──");
+    const existingLubes = await getDocs(collection(db,"lubricants"));
+    const existingLubeNames = existingLubes.docs.map(d=>d.data().name.toLowerCase());
+
+    for (const l of lubes) {
+      if (!l.name) continue;
+      if (existingLubeNames.includes(l.name.toLowerCase())) {
+        log(`  SKIP ${l.name} (already exists)`, "warn");
+        skipped++;
+        continue;
+      }
+      const stock = lubeStock.find(s=>s.id===l.id);
+      try {
+        await addDoc(collection(db,"lubricants"), {
+          name: l.name,
+          unit: l.unit || "Litres",
+          minStock: parseFloat(l.minStock) || 0,
+          currentStock: parseFloat(stock?.qty) || 0,
+          migratedFromLocal: true,
+          createdAt: serverTimestamp()
+        });
+        log(`  ✓ ${l.name} (stock: ${stock?.qty||0})`);
+        migrated++;
+      } catch(e) { log(`  ✗ ${l.name}: ${e.message}`, "err"); }
+    }
+
+    // ── 2. MIGRATE STORE ITEMS ─────────────────────────────────────────────
+    log("\n── Migrating Store Items ──");
+    const existingItems = await getDocs(collection(db,"storeItems"));
+    const existingItemNames = existingItems.docs.map(d=>d.data().name.toLowerCase());
+
+    for (const item of storeItems) {
+      if (!item.name) continue;
+      if (existingItemNames.includes(item.name.toLowerCase())) {
+        log(`  SKIP ${item.name} (already exists)`, "warn");
+        skipped++;
+        continue;
+      }
+      const stock = storeStock.find(s=>s.id===item.id);
+      try {
+        await addDoc(collection(db,"storeItems"), {
+          name: item.name,
+          unit: item.unit || "pcs",
+          category: item.category || "General",
+          minStock: parseFloat(item.minStock) || 0,
+          currentStock: parseFloat(stock?.qty) || 0,
+          migratedFromLocal: true,
+          createdAt: serverTimestamp()
+        });
+        log(`  ✓ ${item.name} (stock: ${stock?.qty||0})`);
+        migrated++;
+      } catch(e) { log(`  ✗ ${item.name}: ${e.message}`, "err"); }
+    }
+
+    // ── 3. MIGRATE LUBE TRANSACTIONS ──────────────────────────────────────
+    log("\n── Migrating Lubricant Transactions ──");
+    const lubeMap = {};
+    const freshLubes = await getDocs(collection(db,"lubricants"));
+    freshLubes.docs.forEach(d=>{ lubeMap[d.data().name?.toLowerCase()] = d.id; });
+    // Also map old IDs from local storage
+    for (const l of lubes) {
+      if (lubeMap[l.name?.toLowerCase()]) {
+        lubeMap[l.id] = lubeMap[l.name.toLowerCase()];
+      }
+    }
+
+    let lubeTxCount = 0;
+    for (const tx of lubeTx) {
+      try {
+        const lubeRef = lubes.find(l=>l.id===tx.itemId);
+        const lubeName = lubeRef?.name || tx.itemName || "Unknown";
+        const lubeId = lubeMap[lubeName?.toLowerCase()] || lubeMap[tx.itemId] || null;
+        const txDate = tx.ts || tx.date || new Date().toISOString();
+        await addDoc(collection(db,"transactions"), {
+          type: "lube",
+          action: tx.action || "issue",
+          itemId: lubeId,
+          itemName: lubeName,
+          qty: parseFloat(tx.qty) || 0,
+          unit: "Litres",
+          takenBy: tx.takenBy || "",
+          dept: tx.dept || "",
+          equipment: tx.equipment || "",
+          desc: tx.desc || "",
+          issuedBy: tx.issuedBy || "Abraham Sackey",
+          issuedById: "migrated",
+          date: tx.date || today(),
+          migratedFromLocal: true,
+          createdAt: txDate ? new Date(txDate) : serverTimestamp()
+        });
+        lubeTxCount++;
+        if (lubeTxCount % 10 === 0) log(`  ✓ ${lubeTxCount}/${lubeTx.length} lube transactions`);
+      } catch(e) { log(`  ✗ tx error: ${e.message}`, "err"); }
+    }
+    log(`  ✓ ${lubeTxCount} lubricant transactions migrated`);
+    migrated += lubeTxCount;
+
+    // ── 4. MIGRATE STORE TRANSACTIONS ─────────────────────────────────────
+    log("\n── Migrating Store Transactions ──");
+    const itemMap = {};
+    const freshItems = await getDocs(collection(db,"storeItems"));
+    freshItems.docs.forEach(d=>{ itemMap[d.data().name?.toLowerCase()] = d.id; });
+    for (const item of storeItems) {
+      if (itemMap[item.name?.toLowerCase()]) {
+        itemMap[item.id] = itemMap[item.name.toLowerCase()];
+      }
+    }
+
+    let storeTxCount = 0;
+    for (const tx of storeTx) {
+      try {
+        const itemRef = storeItems.find(i=>i.id===tx.itemId);
+        const itemName = itemRef?.name || tx.itemName || "Unknown";
+        const itemId = itemMap[itemName?.toLowerCase()] || itemMap[tx.itemId] || null;
+        const txDate = tx.ts || tx.date || new Date().toISOString();
+        await addDoc(collection(db,"transactions"), {
+          type: "store",
+          action: tx.action || "issue",
+          itemId: itemId,
+          itemName: itemName,
+          qty: parseFloat(tx.qty) || 0,
+          unit: itemRef?.unit || "pcs",
+          takenBy: tx.takenBy || "",
+          dept: tx.dept || "",
+          desc: tx.desc || "",
+          issuedBy: tx.issuedBy || "Abraham Sackey",
+          issuedById: "migrated",
+          date: tx.date || today(),
+          migratedFromLocal: true,
+          createdAt: txDate ? new Date(txDate) : serverTimestamp()
+        });
+        storeTxCount++;
+        if (storeTxCount % 10 === 0) log(`  ✓ ${storeTxCount}/${storeTx.length} store transactions`);
+      } catch(e) { log(`  ✗ tx error: ${e.message}`, "err"); }
+    }
+    log(`  ✓ ${storeTxCount} store transactions migrated`);
+    migrated += storeTxCount;
+
+    // ── 5. MIGRATE REQUISITIONS ───────────────────────────────────────────
+    log("\n── Migrating Requisitions ──");
+    let reqCount = 0;
+    for (const r of reqs) {
+      try {
+        const reqDate = r.ts || r.date || new Date().toISOString();
+        await addDoc(collection(db,"requisitions"), {
+          item: r.item || "",
+          qty: r.qty || "",
+          unit: r.unit || "pcs",
+          urgency: r.urgency || "normal",
+          reason: r.reason || "",
+          dept: r.dept || "Administration",
+          requestedBy: r.requestedBy || "Abraham Sackey",
+          userId: "migrated",
+          status: r.status || "pending",
+          approvedBy: r.approvedBy || null,
+          adminNote: r.adminNote || "",
+          date: r.date || today(),
+          migratedFromLocal: true,
+          createdAt: reqDate ? new Date(reqDate) : serverTimestamp()
+        });
+        reqCount++;
+      } catch(e) { log(`  ✗ req error: ${e.message}`, "err"); }
+    }
+    log(`  ✓ ${reqCount} requisitions migrated`);
+    migrated += reqCount;
+
+    // ── 6. MIGRATE RECEIPTS ───────────────────────────────────────────────
+    if (receipts.length > 0) {
+      log("\n── Migrating Receipts ──");
+      let recCount = 0;
+      for (const r of receipts) {
+        try {
+          const recDate = r.ts || r.date || new Date().toISOString();
+          await addDoc(collection(db,"receipts"), {
+            vendor: r.vendor || "",
+            amount: r.amount || "",
+            description: r.description || "",
+            imageUrl: null, // local base64 images can't be migrated
+            recordedBy: r.recordedBy || "Abraham Sackey",
+            recordedById: "migrated",
+            dept: r.dept || "Administration",
+            date: r.date || today(),
+            migratedFromLocal: true,
+            createdAt: recDate ? new Date(recDate) : serverTimestamp()
+          });
+          recCount++;
+        } catch(e) { log(`  ✗ receipt error: ${e.message}`, "err"); }
+      }
+      log(`  ✓ ${recCount} receipts migrated`);
+      migrated += recCount;
+    }
+
+    // ── DONE ──────────────────────────────────────────────────────────────
+    log(`\n${"═".repeat(38)}`);
+    log(`✅ MIGRATION COMPLETE!`);
+    log(`   ${migrated} records uploaded to Firebase`);
+    log(`   ${skipped} items skipped (already existed)`);
+    log(`${"═".repeat(38)}`);
+    log("\nAbrahim's phone: open kktr-stores.vercel.app");
+    log("All other phones: same URL, same data. ✓");
+
+    document.getElementById("done-section").style.display = "block";
+    btn.textContent = "✅ Migration Complete";
+  };
+
+  function today() {
+    return new Date().toISOString().split("T")[0];
+  }
+</script>
+</body>
+</html>
