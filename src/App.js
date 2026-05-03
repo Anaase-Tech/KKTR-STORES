@@ -129,10 +129,10 @@ const monthStart = () => {
 };
 
 // ─── UI PRIMITIVES ────────────────────────────────────────────────────────────
-function Card({children,style={}}){
-  return <div style={{background:C.white,borderRadius:"14px",padding:"14px",
+function Card({children,style={},onClick}){
+  return <div onClick={onClick} style={{background:C.white,borderRadius:"14px",padding:"14px",
     boxShadow:"0 2px 10px rgba(26,46,26,0.12)",border:`1px solid ${C.border}`,
-    marginBottom:"10px",...style}}>{children}</div>;
+    marginBottom:"10px",cursor:onClick?"pointer":"default",...style}}>{children}</div>;
 }
 function Inp({label,wrapStyle={},...props}){
   return(
@@ -306,13 +306,12 @@ function LoginScreen({onLogin,onRegister,onForgot}){
         }
         setErr("Wrong password."); setLoading(false); return;
       }
-      // Format display name properly — never reassign const
+      // Format display name properly — mutate property, not reassign const
       if(!data.name || data.name === data.username) {
         if(data.username && data.username.includes(".")) {
           const parts = data.username.split(".");
-          const formatted = parts.map(p => p.charAt(0).toUpperCase()+p.slice(1)).join(" ");
-          data.name = formatted; // safe — mutating object property, not reassigning const
-          // Silently update Firestore with proper name
+          const formatted = parts.map(pt => pt.charAt(0).toUpperCase()+pt.slice(1)).join(" ");
+          data.name = formatted;
           setDoc(doc(db,"users",uname),{name:formatted},{merge:true}).catch(()=>{});
         }
       }
@@ -713,15 +712,15 @@ function DeptDashboard({user,onNav}){
 }
 
 function HRDashboard({user,onNav}){
-  const [p,setP]=useState({reqs:0,chop:0,att:0});
+  const [p,setP]=useState({chop:0,att:0,workers:0});
   useEffect(()=>{
-    const uR=onSnapshot(query(collection(db,"requisitions"),where("status","==","pending")),
-      s=>setP(x=>({...x,reqs:s.size})));
     const uC=onSnapshot(query(collection(db,"chopMoney"),where("status","==","pending")),
       s=>setP(x=>({...x,chop:s.size})));
     const uA=onSnapshot(query(collection(db,"attendanceReports"),where("status","==","pending")),
       s=>setP(x=>({...x,att:s.size})));
-    return()=>{uR();uC();uA();};
+    const uW=onSnapshot(collection(db,"workers"),
+      s=>setP(x=>({...x,workers:s.size})));
+    return()=>{uC();uA();uW();};
   },[]);
   return(
     <div style={{padding:"0 12px 80px"}}>
@@ -734,10 +733,10 @@ function HRDashboard({user,onNav}){
       </div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"10px",marginBottom:"12px"}}>
         {[
-          {icon:"📋",l:"Pending Reqs",v:p.reqs,c:p.reqs>0?C.warn:C.ok,action:()=>onNav("reqs")},
-          {icon:"💰",l:"Chop Money",v:p.chop,s:"pending",c:p.chop>0?C.warn:C.ok,action:()=>onNav("hr")},
-          {icon:"📅",l:"Attendance",v:p.att,s:"pending reports",c:p.att>0?C.warn:C.ok,action:()=>onNav("attendance")},
-          {icon:"👥",l:"Staff Roster",v:"→",s:"manage workers",c:C.sage,action:()=>onNav("hr")},
+          {icon:"💰",l:"Chop Money",v:p.chop,s:"pending approval",c:p.chop>0?C.warn:C.ok,action:()=>onNav("hr")},
+          {icon:"📅",l:"Attendance",v:p.att,s:"pending reports",c:p.att>0?C.warn:C.ok,action:()=>onNav("hr")},
+          {icon:"👥",l:"Staff Roster",v:p.workers,s:"total workers",c:C.sage,action:()=>onNav("hr")},
+          {icon:"💬",l:"Chat Admin",v:"→",s:"direct line",c:C.blue,action:()=>onNav("chat")},
         ].map((s,i)=>(
           <Card key={i} style={{marginBottom:0,cursor:"pointer"}} onClick={s.action}>
             <div style={{fontSize:"1.6rem",marginBottom:"2px"}}>{s.icon}</div>
@@ -1155,7 +1154,7 @@ function AddItemForm({onSave}){
   </div>);
 }
 
-// ─── REQUISITIONS ─────────────────────────────────────────────────────────────
+// ─── REQUISITIONS v8.2.2 — SMART ROUTING ─────────────────────────────────────
 function ReqsModule({user}){
   const [reqs,setReqs]=useState([]);
   const [modal,setModal]=useState(false);
@@ -1164,60 +1163,98 @@ function ReqsModule({user}){
   const [tab,setTab]=useState("pending");
   const [loading,setLoading]=useState(false);
 
-  // STRICT ROLE RULES:
-  // admin → sees ALL requests, can approve/reject
-  // hr → sees only their own requests, CANNOT approve
-  // dept → sees only their own requests, CANNOT approve
+  // v8.2.2 STRICT ROLE DEFINITIONS
   const isAdmin=user.role==="admin";
-  const canApprove=user.role==="admin"; // ONLY admin approves/rejects
+  const isHR=user.dept==="HR"||user.role==="hr";
+  const isCOO=user.dept==="Administration"&&!isAdmin; // COO = Administration dept, not the admin account
+
+  // ROUTING RULE:
+  // Admin creates → approverRole:"coo" → COO approves
+  // Everyone else creates → approverRole:"admin" → Admin approves
+
+  // WHAT EACH ROLE SEES:
+  // Admin → only reqs with approverRole:"admin"
+  // COO (Administration dept) → only reqs with approverRole:"coo"
+  // HR/Dept → only their own submissions
 
   useEffect(()=>{
     let q;
     if(isAdmin)
-      // Admin sees all pending requests
-      q=query(collection(db,"requisitions"),orderBy("createdAt","desc"));
+      // Admin sees requests routed to them
+      q=query(collection(db,"requisitions"),
+        where("approverRole","==","admin"),orderBy("createdAt","desc"));
+    else if(isCOO)
+      // COO sees escalated requests (from Admin)
+      q=query(collection(db,"requisitions"),
+        where("approverRole","==","coo"),orderBy("createdAt","desc"));
     else
       // HR and dept heads see only their own
       q=query(collection(db,"requisitions"),
         where("userId","==",user.id),orderBy("createdAt","desc"));
     return onSnapshot(q,s=>setReqs(s.docs.map(d=>({id:d.id,...d.data()}))));
-  },[user,isAdmin]);
+  },[user,isAdmin,isCOO]);
 
   const submit=async(f)=>{
     if(!f.item||!f.qty) return showToast("Item and quantity required","warn");
     setLoading(true);
     try {
+      // KEY ROUTING LOGIC: Admin's requests go to COO, everyone else goes to Admin
+      const approverRole=isAdmin?"coo":"admin";
       await addDoc(collection(db,"requisitions"),{
         ...f,
         dept:user.dept,
         requestedBy:user?.name||user?.username||"Unknown",
         userId:user.id,
+        approverRole,
         status:"pending",
         createdAt:serverTimestamp()
       });
-      showToast("✅ Request submitted to Stores Manager!");
+      const dest=isAdmin?"Administration (COO)":"Stores Manager";
+      showToast(`✅ Request submitted to ${dest}!`);
       setModal(false);
     } catch(e){ showToast("Failed: "+e.message,"danger"); }
     setLoading(false);
   };
 
-  const decide=async(id,action,note="")=>{
-    // Double-check on frontend too
-    if(!canApprove){
-      showToast("Only the Stores Manager can approve requests","danger");
-      return;
-    }
+  const approveReq=async(id,req)=>{
+    // Double-check authority based on approverRole
+    if(req.approverRole==="admin"&&!isAdmin)
+      return showToast("Only Stores Admin can approve this request","danger");
+    if(req.approverRole==="coo"&&!isCOO)
+      return showToast("Only COO (Administration) can approve this request","danger");
     try {
       await updateDoc(doc(db,"requisitions",id),{
-        status:action,
-        approvedBy:user?.name||user?.username||"Abraham Sackey",
-        adminNote:note,
+        status:"approved",
+        approvedBy:user?.name||user?.username||"Unknown",
+        approvedRole:req.approverRole,
         approvedAt:serverTimestamp()
       });
-      showToast(action==="approved"?"✅ Approved!":"❌ Rejected");
-      setDetail(null);
+      showToast("✅ Approved!"); setDetail(null);
     } catch(e){ showToast("Failed: "+e.message,"danger"); }
   };
+
+  const rejectReq=async(id,req,note="")=>{
+    if(req.approverRole==="admin"&&!isAdmin)
+      return showToast("Only Stores Admin can reject this request","danger");
+    if(req.approverRole==="coo"&&!isCOO)
+      return showToast("Only COO (Administration) can reject this request","danger");
+    try {
+      await updateDoc(doc(db,"requisitions",id),{
+        status:"rejected",
+        rejectedBy:user?.name||user?.username||"Unknown",
+        rejectedRole:req.approverRole,
+        adminNote:note,
+        rejectedAt:serverTimestamp()
+      });
+      showToast("❌ Rejected"); setDetail(null);
+    } catch(e){ showToast("Failed: "+e.message,"danger"); }
+  };
+
+  // Can this user approve/reject the currently viewed request?
+  const canDecide=(req)=>req&&req.status==="pending"&&(
+    (req.approverRole==="admin"&&isAdmin)||
+    (req.approverRole==="coo"&&isCOO)
+  );
 
   const pending=reqs.filter(r=>r.status==="pending");
   const approved=reqs.filter(r=>r.status==="approved");
@@ -1232,21 +1269,30 @@ function ReqsModule({user}){
         <div style={{fontWeight:800,fontSize:"1.2rem",color:C.forest}}>📋 Requisitions</div>
         <Btn sm onClick={()=>setModal(true)}>+ New</Btn>
       </div>
-      {canApprove&&(
+
+      {/* Role authority banners */}
+      {isAdmin&&(
         <div style={{padding:"8px",background:"#e8f5e9",borderRadius:"8px",
           fontSize:"0.78rem",color:C.sage,marginBottom:"10px",fontWeight:700}}>
-          ✅ You can approve/reject all department requests</div>
+          👑 Admin — you approve department requests. Your own requests go to COO.</div>
       )}
-      {!canApprove&&user.role==="hr"&&(
+      {isCOO&&(
+        <div style={{padding:"8px",background:"#e3f2fd",borderRadius:"8px",
+          fontSize:"0.78rem",color:C.blue,marginBottom:"10px",fontWeight:700}}>
+          🏢 COO — you approve requests escalated from the Stores Admin.</div>
+      )}
+      {!isAdmin&&!isCOO&&(
         <div style={{padding:"8px",background:"#fff8e7",borderRadius:"8px",
           fontSize:"0.78rem",color:C.timber,marginBottom:"10px",fontWeight:700}}>
-          📋 HR — submit requests to stores. Only Abraham approves.</div>
+          📋 Submit requests to Stores Admin for approval.</div>
       )}
+
       <TabBar tabs={[
         {id:"pending",label:`Pending (${pending.length})`},
         {id:"approved",label:"Approved"},
         {id:"rejected",label:"Rejected"}
       ]} active={tab} onSelect={setTab}/>
+
       {shown.length===0&&<div style={{textAlign:"center",color:"#aaa",padding:"40px"}}>
         No {tab} requisitions.</div>}
       {shown.map(r=>(
@@ -1254,12 +1300,15 @@ function ReqsModule({user}){
           r.status==="pending"?C.warn:r.status==="approved"?C.ok:C.danger}`,
           marginBottom:"8px",cursor:"pointer"}} onClick={()=>setDetail(r)}>
           <div style={{display:"flex",justifyContent:"space-between"}}>
-            <div>
+            <div style={{flex:1}}>
               <div style={{fontWeight:800,color:C.forest}}>{r.item}</div>
               <div style={{fontSize:"0.75rem",color:"#888"}}>
                 {r.dept} · {fmtDate(r.createdAt)}</div>
               <div style={{fontSize:"0.78rem",color:C.timber}}>
                 👤 {r.requestedBy} · {r.qty} {r.unit||""}</div>
+              {/* Routing indicator */}
+              <div style={{fontSize:"0.68rem",color:"#aaa",marginTop:"2px"}}>
+                → {r.approverRole==="admin"?"Stores Admin":"COO (Administration)"}</div>
               {r.urgency&&r.urgency!=="normal"&&
                 <Badge color={r.urgency==="critical"?C.danger:C.warn}>
                   {r.urgency.toUpperCase()}</Badge>}
@@ -1269,45 +1318,74 @@ function ReqsModule({user}){
           </div>
         </Card>
       ))}
+
       {modal&&<Modal title="New Requisition" onClose={()=>setModal(false)}>
-        <ReqForm onSubmit={submit} loading={loading} user={user}/>
+        <ReqForm onSubmit={submit} loading={loading} user={user} isAdmin={isAdmin}/>
       </Modal>}
-      {detail&&<Modal title="Requisition Detail" onClose={()=>setDetail(null)}>
-        <div style={{marginBottom:"12px"}}>
-          <div style={{fontWeight:800,color:C.forest,fontSize:"1rem",marginBottom:"4px"}}>
+
+      {detail&&<Modal title="📋 Requisition Detail" onClose={()=>setDetail(null)}>
+        <div style={{marginBottom:"16px"}}>
+          <div style={{fontWeight:800,color:C.forest,fontSize:"1.1rem",marginBottom:"8px"}}>
             {detail.item}</div>
-          <div style={{fontSize:"0.82rem",color:"#888",lineHeight:1.8}}>
-            <div>📅 {fmtDate(detail.createdAt)} · {detail.dept}</div>
-            <div>👤 {detail.requestedBy} · {detail.qty} {detail.unit||""}</div>
-            {detail.reason&&<div>💬 {detail.reason}</div>}
+          <div style={{background:C.mist,borderRadius:"10px",padding:"12px",
+            fontSize:"0.85rem",lineHeight:2}}>
+            <div>📅 <strong>Date:</strong> {fmtDate(detail.createdAt)}</div>
+            <div>🏢 <strong>Department:</strong> {detail.dept}</div>
+            <div>👤 <strong>Requested By:</strong> {detail.requestedBy}</div>
+            <div>📦 <strong>Quantity:</strong> {detail.qty} {detail.unit||"pcs"}</div>
+            <div>🔀 <strong>Approval Authority:</strong> {detail.approverRole==="admin"
+              ?"Stores Admin":"COO (Administration)"}</div>
+            {detail.urgency&&detail.urgency!=="normal"&&(
+              <div>🚨 <strong>Urgency:</strong>
+                <span style={{marginLeft:"6px",background:detail.urgency==="critical"?C.danger:C.warn,
+                  color:"white",padding:"2px 8px",borderRadius:"10px",fontSize:"0.75rem",
+                  fontWeight:700}}>{detail.urgency.toUpperCase()}</span>
+              </div>
+            )}
+            {detail.reason&&<div>💬 <strong>Reason:</strong> {detail.reason}</div>}
+            <div>📌 <strong>Status:</strong>
+              <span style={{marginLeft:"6px",
+                color:detail.status==="approved"?C.ok:detail.status==="rejected"?C.danger:C.warn,
+                fontWeight:800}}>{detail.status.toUpperCase()}</span>
+            </div>
+            {detail.approvedBy&&<div>✅ <strong>Actioned By:</strong> {detail.approvedBy}</div>}
             {detail.adminNote&&<div style={{color:detail.status==="approved"?C.ok:C.danger}}>
-              📝 {detail.adminNote}</div>}
+              📝 <strong>Note:</strong> {detail.adminNote}</div>}
           </div>
         </div>
-        {canApprove&&detail.status==="pending"&&(
-          <ReqDecide req={detail} onDecide={decide}/>
+        {canDecide(detail)&&(
+          <ReqDecide req={detail} onApprove={approveReq} onReject={rejectReq}/>
+        )}
+        {!canDecide(detail)&&detail.status==="pending"&&(
+          <div style={{padding:"10px",background:"#fff8e7",borderRadius:"8px",
+            fontSize:"0.82rem",color:C.timber,textAlign:"center",fontWeight:600}}>
+            ⏳ Waiting for {detail.approverRole==="admin"?"Stores Admin":"COO"} to approve
+          </div>
         )}
       </Modal>}
     </div>
   );
 }
-function ReqDecide({req,onDecide}){
+function ReqDecide({req,onApprove,onReject}){
   const [note,setNote]=useState("");
   return(<div>
     <Inp label="Note (optional)" value={note}
       onChange={e=>setNote(e.target.value)} placeholder="e.g. Approved for Monday"/>
     <div style={{display:"flex",gap:"8px"}}>
-      <Btn onClick={()=>onDecide(req.id,"approved",note)} color={C.ok}
+      <Btn onClick={()=>onApprove(req.id,req)} color={C.ok}
         style={{flex:1,justifyContent:"center"}}>✓ Approve</Btn>
-      <Btn onClick={()=>onDecide(req.id,"rejected",note)} color={C.danger}
+      <Btn onClick={()=>onReject(req.id,req,note)} color={C.danger}
         style={{flex:1,justifyContent:"center"}}>✗ Reject</Btn>
     </div>
   </div>);
 }
-function ReqForm({onSubmit,loading,user}){
+function ReqForm({onSubmit,loading,user,isAdmin}){
   const [f,setF]=useState({item:"",qty:"",unit:"pcs",urgency:"normal",reason:""});
-  const dest=user&&user.role==="admin"?"Administration (COO)":"Stores Manager";
+  const dest=isAdmin?"Administration (COO)":"Stores Manager";
   return(<div>
+    <div style={{padding:"8px",background:"#f0f4ff",borderRadius:"8px",
+      fontSize:"0.78rem",color:C.blue,marginBottom:"10px",fontWeight:700}}>
+      📤 This request will go to: <strong>{dest}</strong></div>
     <Inp label="Item / Description *" value={f.item}
       onChange={e=>setF({...f,item:e.target.value})} placeholder="What do you need?"/>
     <div style={{display:"flex",gap:"8px"}}>
@@ -1452,12 +1530,24 @@ function ReceiptForm({onSave,loading}){
 
 // ─── CHAT ─────────────────────────────────────────────────────────────────────
 function ChatModule({user}){
-  const [activeDept,setActiveDept]=useState(
-    user.role==="admin"||user.dept==="HR"?null:user.dept);
-  if((user.role==="admin"||user.dept==="HR")&&!activeDept)
-    return <AdminChatList user={user} onSelect={setActiveDept}/>;
-  return <ChatThread dept={activeDept} user={user}
-    onBack={user.role==="admin"||user.dept==="HR"?()=>setActiveDept(null):null}/>;
+  const [activeDept,setActiveDept]=useState(null);
+  const isAdmin=user.role==="admin";
+  const isHR=user.dept==="HR"||user.role==="hr";
+
+  // STRICT CHAT RULES:
+  // Admin → sees all departments, can message any
+  // HR → talks directly to admin only (not other departments)
+  // Dept heads → talks directly to admin only
+
+  if(isAdmin){
+    // Admin sees department list, picks who to chat
+    if(!activeDept) return <AdminChatList user={user} onSelect={setActiveDept}/>;
+    return <ChatThread dept={activeDept} user={user} onBack={()=>setActiveDept(null)}/>;
+  }
+
+  // HR and dept heads go directly to "admin" thread — no department selection
+  // Thread is named after their own department so admin can identify them
+  return <ChatThread dept={user.dept} user={user} onBack={null}/>;
 }
 function AdminChatList({user,onSelect}){
   const [threads,setThreads]=useState({});
@@ -1522,7 +1612,7 @@ function ChatThread({dept,user,onBack}){
   const [msgs,setMsgs]=useState([]);
   const [input,setInput]=useState("");
   const bottomRef=useRef(null);
-  const isAdmin=user.role==="admin"||user.dept==="HR";
+  const isAdmin=user.role==="admin"; // ONLY admin sends as "admin"
 
   useEffect(()=>{
     // Firestore subcollection: chats/{dept}/messages
@@ -1678,8 +1768,9 @@ function AttendanceModule({user}){
 
   useEffect(()=>{
     if(!selDate||workers.length===0) return;
-    // attendance/{dept}/{date}/records — grouped by dept then date
-    getDocs(collection(db,"attendance",dept,selDate))
+    // v8.2: flat attendance collection — query by dept + date
+    getDocs(query(collection(db,"attendance"),
+      where("dept","==",dept),where("date","==",selDate)))
       .then(s=>{
         const a={};
         s.docs.forEach(d=>{ a[d.data().workerId]=d.data().present; });
@@ -1690,17 +1781,18 @@ function AttendanceModule({user}){
   const saveAtt=async()=>{
     setLoading(true);
     try {
-      // Upsert — use workerId_date as doc ID to prevent duplicates
+      // v8.2: flat attendance/{dept_date_workerId} — one collection, no subcollections
       for(const w of workers){
-        const docId=`${w.id}_${selDate}`;
-        await setDoc(doc(db,"attendance",dept,selDate,docId),{
+        const docId=`${dept}_${selDate}_${w.id}`;
+        await setDoc(doc(db,"attendance",docId),{
           workerId:w.id,workerName:w.name,workerType:w.type||"casual",
           dept,date:selDate,present:!!att[w.id],
           markedBy:user?.name||user?.username||"Unknown",
+          status:"pending", // HR must approve
           createdAt:serverTimestamp()
         });
       }
-      showToast("✅ Attendance saved!");
+      showToast("✅ Attendance saved — awaiting HR approval!");
     } catch(e){ showToast("Failed: "+e.message,"danger"); }
     setLoading(false);
   };
@@ -1709,25 +1801,18 @@ function AttendanceModule({user}){
     setLoading(true);
     try {
       const wStart=weekStart();
-      // Collect all dates in this week
+      // v8.2: flat attendance collection — query by dept
+      const snap=await getDocs(query(collection(db,"attendance"),
+        where("dept","==",dept),where("present","==",true)));
       const workerDays={};
-      const dates=[];
-      let d=new Date(wStart);
-      while(d<=new Date()){
-        dates.push(d.toISOString().split("T")[0]);
-        d.setDate(d.getDate()+1);
-      }
-      for(const date of dates){
-        try {
-          const snap=await getDocs(collection(db,"attendance",dept,date));
-          snap.docs.map(d=>d.data()).filter(r=>r.present).forEach(r=>{
-            workerDays[r.workerId]={
-              name:r.workerName,
-              days:(workerDays[r.workerId]?.days||0)+1
-            };
-          });
-        } catch(e2){}
-      }
+      snap.docs.map(d=>d.data()).forEach(r=>{
+        if(r.date>=wStart&&r.date<=today()){
+          workerDays[r.workerId]={
+            name:r.workerName,
+            days:(workerDays[r.workerId]?.days||0)+1
+          };
+        }
+      });
       const chopList=Object.entries(workerDays)
         .map(([id,{name,days}])=>({workerId:id,name,days,amount:days*CHOP_RATE}));
       const total=chopList.reduce((s,w)=>s+w.amount,0);
@@ -1749,25 +1834,17 @@ function AttendanceModule({user}){
       workers.forEach(w=>{
         summary[w.id]={name:w.name,type:w.type||"casual",present:0,absent:0};
       });
-      // Loop each date in this month
-      const dates=[];
-      let d=new Date(mStart);
-      const now=new Date();
-      while(d<=now){
-        dates.push(d.toISOString().split("T")[0]);
-        d.setDate(d.getDate()+1);
-      }
-      for(const date of dates){
-        try {
-          const snap=await getDocs(collection(db,"attendance",dept,date));
-          snap.docs.map(d=>d.data()).forEach(r=>{
-            if(!summary[r.workerId])
-              summary[r.workerId]={name:r.workerName,type:"casual",present:0,absent:0};
-            if(r.present) summary[r.workerId].present++;
-            else summary[r.workerId].absent++;
-          });
-        } catch(e2){}
-      }
+      // v8.2: flat attendance collection — single query by dept
+      const snap=await getDocs(query(collection(db,"attendance"),
+        where("dept","==",dept)));
+      snap.docs.map(d=>d.data()).forEach(r=>{
+        if(r.date>=mStart&&r.date<=today()){
+          if(!summary[r.workerId])
+            summary[r.workerId]={name:r.workerName,type:"casual",present:0,absent:0};
+          if(r.present) summary[r.workerId].present++;
+          else summary[r.workerId].absent++;
+        }
+      });
       await addDoc(collection(db,"attendanceReports"),{
         dept,month:mStart.slice(0,7),monthStart:mStart,monthEnd:today(),
         summary:Object.entries(summary).map(([id,v])=>({
@@ -1860,17 +1937,109 @@ function AttendanceModule({user}){
 // ─── HR MODULE ────────────────────────────────────────────────────────────────
 function HRModule({user}){
   const [tab,setTab]=useState("roster");
+  const isHR=user.dept==="HR"||user.role==="hr";
   return(
     <div style={{padding:"0 12px 80px"}}>
       <div style={{fontWeight:800,fontSize:"1.2rem",color:C.forest,
         marginBottom:"12px",paddingTop:"4px"}}>👥 HR Management</div>
       <TabBar tabs={[{id:"roster",label:"Roster"},{id:"chop",label:"Chop $"},
-        {id:"attendance",label:"Attend."},{id:"reqs",label:"Reqs"}]}
+        {id:"attendance",label:"Attend."},{id:"attapprove",label:"Approve Att."}]}
         active={tab} onSelect={setTab}/>
       {tab==="roster"&&<StaffRoster user={user}/>}
       {tab==="chop"&&<ChopMoney user={user}/>}
       {tab==="attendance"&&<AttendanceReports user={user}/>}
-      {tab==="reqs"&&<ReqsModule user={user}/>}
+      {tab==="attapprove"&&<AttendanceApproval user={user}/>}
+    </div>
+  );
+}
+
+// ─── ATTENDANCE APPROVAL (HR ONLY) ───────────────────────────────────────────
+function AttendanceApproval({user}){
+  const [records,setRecords]=useState([]);
+  const [toastEl,showToast]=useToast();
+  const isHR=user.dept==="HR"||user.role==="hr";
+
+  useEffect(()=>{
+    // HR sees all pending attendance records across all depts
+    return onSnapshot(query(collection(db,"attendance"),
+      where("status","==","pending"),orderBy("createdAt","desc")),
+      s=>setRecords(s.docs.map(d=>({id:d.id,...d.data()}))),
+      ()=>{});
+  },[]);
+
+  const approveRecord=async(id)=>{
+    if(!isHR){ showToast("Only HR can approve attendance","danger"); return; }
+    try {
+      await updateDoc(doc(db,"attendance",id),{
+        status:"approved",
+        approvedBy:user?.name||user?.username||"HR",
+        approvedAt:serverTimestamp()
+      });
+      showToast("✅ Attendance approved!");
+    } catch(e){ showToast("Failed: "+e.message,"danger"); }
+  };
+
+  const approveBatch=async(deptDate)=>{
+    if(!isHR){ showToast("Only HR can approve attendance","danger"); return; }
+    const batch=records.filter(r=>r.dept===deptDate.dept&&r.date===deptDate.date&&r.status==="pending");
+    try {
+      for(const r of batch){
+        await updateDoc(doc(db,"attendance",r.id),{
+          status:"approved",approvedBy:user?.name||"HR",approvedAt:serverTimestamp()
+        });
+      }
+      showToast(`✅ Approved all ${deptDate.dept} attendance for ${deptDate.date}`);
+    } catch(e){ showToast("Failed: "+e.message,"danger"); }
+  };
+
+  // Group by dept + date
+  const groups={};
+  records.forEach(r=>{
+    const key=`${r.dept}__${r.date}`;
+    if(!groups[key]) groups[key]={dept:r.dept,date:r.date,records:[]};
+    groups[key].records.push(r);
+  });
+
+  return(
+    <div>
+      {toastEl}
+      {!isHR&&(
+        <div style={{padding:"12px",background:"#fff8e7",borderRadius:"8px",
+          color:C.timber,fontWeight:700,fontSize:"0.85rem"}}>
+          ⚠ Only HR can approve attendance records.</div>
+      )}
+      {Object.keys(groups).length===0&&(
+        <div style={{textAlign:"center",color:"#aaa",padding:"30px"}}>
+          No pending attendance records.</div>
+      )}
+      {Object.entries(groups).map(([key,g])=>(
+        <Card key={key} style={{marginBottom:"10px",
+          borderLeft:`4px solid ${C.gold}`}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"8px"}}>
+            <div>
+              <div style={{fontWeight:800,color:C.forest}}>{g.dept}</div>
+              <div style={{fontSize:"0.75rem",color:"#888"}}>{g.date} · {g.records.length} workers</div>
+            </div>
+            {isHR&&(
+              <Btn sm onClick={()=>approveBatch(g)} color={C.ok}>✓ Approve All</Btn>
+            )}
+          </div>
+          {g.records.map(r=>(
+            <div key={r.id} style={{display:"flex",justifyContent:"space-between",
+              alignItems:"center",padding:"6px 0",borderTop:`1px dashed ${C.border}`}}>
+              <div>
+                <span style={{fontWeight:600,color:C.forest,fontSize:"0.85rem"}}>{r.workerName}</span>
+                <span style={{marginLeft:"8px",
+                  color:r.present?C.ok:C.danger,fontSize:"0.75rem",fontWeight:700}}>
+                  {r.present?"Present":"Absent"}</span>
+              </div>
+              {isHR&&r.status==="pending"&&(
+                <Btn sm onClick={()=>approveRecord(r.id)} color={C.ok}>✓</Btn>
+              )}
+            </div>
+          ))}
+        </Card>
+      ))}
     </div>
   );
 }
@@ -1961,13 +2130,18 @@ function ChopMoney({user}){
   const [subs,setSubs]=useState([]);
   const [detail,setDetail]=useState(null);
   const [toastEl,showToast]=useToast();
+  // v8.2: HR approves chop money, NOT admin
+  const isHR=user.dept==="HR"||user.role==="hr";
   useEffect(()=>{
     return onSnapshot(query(collection(db,"chopMoney"),orderBy("createdAt","desc")),
       s=>setSubs(s.docs.map(d=>({id:d.id,...d.data()}))));
   },[]);
   const decide=async(id,action)=>{
+    if(!isHR){ showToast("Only HR can approve chop money","danger"); return; }
     await updateDoc(doc(db,"chopMoney",id),{
-      status:action,approvedBy:user?.name||user?.username||"Admin",approvedAt:serverTimestamp()
+      status:action==="approved"?"paid":"rejected",
+      paidBy:user?.name||user?.username||"HR",
+      paidAt:serverTimestamp()
     });
     showToast(action==="approved"?"✅ Approved for payment!":"Rejected");
     setDetail(null);
@@ -1992,26 +2166,60 @@ function ChopMoney({user}){
           </div>
         </Card>
       ))}
-      {detail&&<Modal title="Chop Money" onClose={()=>setDetail(null)}>
-        <div style={{fontWeight:800,color:C.forest,marginBottom:"4px"}}>{detail.dept}</div>
-        <div style={{fontSize:"0.82rem",color:"#888",marginBottom:"8px"}}>
-          {detail.weekStart} – {detail.weekEnd}</div>
-        <div style={{fontWeight:700,color:C.gold,fontSize:"1rem",margin:"8px 0"}}>
-          Total: GH₵{detail.totalAmount}</div>
+      {detail&&<Modal title="💰 Chop Money Detail" onClose={()=>setDetail(null)}>
+        <div style={{background:C.mist,borderRadius:"10px",padding:"12px",marginBottom:"12px"}}>
+          <div style={{fontWeight:800,color:C.forest,fontSize:"1rem"}}>{detail.dept}</div>
+          <div style={{fontSize:"0.82rem",color:"#888",marginTop:"2px"}}>
+            Week: {detail.weekStart} – {detail.weekEnd}</div>
+          <div style={{fontWeight:800,color:C.gold,fontSize:"1.3rem",marginTop:"6px"}}>
+            Total: GH₵{detail.totalAmount||0}</div>
+          <div style={{fontSize:"0.72rem",color:"#aaa"}}>
+            GH₵{CHOP_RATE}/day · by {detail.submittedBy}</div>
+        </div>
+        <div style={{fontWeight:700,color:C.forest,fontSize:"0.82rem",
+          textTransform:"uppercase",marginBottom:"8px"}}>Worker Breakdown</div>
+        {(detail.chopList||[]).length===0&&(
+          <div style={{color:"#aaa",fontSize:"0.82rem",padding:"8px 0"}}>
+            No attendance data for this period.</div>
+        )}
         {(detail.chopList||[]).map((w,i)=>(
           <div key={i} style={{display:"flex",justifyContent:"space-between",
-            padding:"6px 0",borderBottom:`1px dashed ${C.border}`,fontSize:"0.85rem"}}>
-            <span>{w.name}</span>
-            <span style={{color:"#888"}}>{w.days} days</span>
-            <span style={{fontWeight:700,color:C.gold}}>GH₵{w.amount}</span>
+            alignItems:"center",padding:"8px 0",
+            borderBottom:`1px dashed ${C.border}`,fontSize:"0.85rem"}}>
+            <span style={{fontWeight:600,color:C.forest,flex:2}}>{w.name}</span>
+            <span style={{color:"#888",flex:1,textAlign:"center"}}>{w.days}d</span>
+            <span style={{fontWeight:800,color:C.gold,flex:1,textAlign:"right"}}>
+              GH₵{w.amount}</span>
           </div>
         ))}
-        {detail.status==="pending"&&(
-          <div style={{display:"flex",gap:"8px",marginTop:"12px"}}>
+        <div style={{display:"flex",gap:"8px",margin:"12px 0"}}>
+          <Btn sm onClick={()=>{
+            const txt=`KKTR CHOP MONEY REPORT\nDept: ${detail.dept}\nWeek: ${detail.weekStart} – ${detail.weekEnd}\nTotal: GH₵${detail.totalAmount||0}\n\n${(detail.chopList||[]).map(w=>`${w.name}: ${w.days} days = GH₵${w.amount}`).join("\n")}\n\nBy: ${detail.submittedBy}`;
+            window.open(`https://wa.me/?text=${encodeURIComponent(txt)}`,"_blank");
+          }} color="#25D366" style={{flex:1,justifyContent:"center"}}>📱 WhatsApp</Btn>
+          <Btn sm onClick={()=>{
+            const txt=`KKTR CHOP MONEY REPORT\nDept: ${detail.dept}\nWeek: ${detail.weekStart} – ${detail.weekEnd}\nTotal: GH₵${detail.totalAmount||0}\n\n${(detail.chopList||[]).map(w=>`${w.name}: ${w.days} days = GH₵${w.amount}`).join("\n")}`;
+            window.open(`mailto:?subject=KKTR Chop Money — ${detail.dept}&body=${encodeURIComponent(txt)}`,"_blank");
+          }} color={C.timber} style={{flex:1,justifyContent:"center"}}>✉ Email COO</Btn>
+        </div>
+        {detail.status==="pending"&&isHR&&(
+          <div style={{display:"flex",gap:"8px"}}>
             <Btn onClick={()=>decide(detail.id,"approved")} color={C.ok}
               style={{flex:1,justifyContent:"center"}}>✓ Approve</Btn>
             <Btn onClick={()=>decide(detail.id,"rejected")} color={C.danger}
               style={{flex:1,justifyContent:"center"}}>✗ Reject</Btn>
+          </div>
+        )}
+        {detail.status==="pending"&&!isHR&&(
+          <div style={{padding:"10px",background:"#fff8e7",borderRadius:"8px",
+            fontSize:"0.82rem",color:C.timber,textAlign:"center"}}>
+            ⏳ Waiting for HR to approve
+          </div>
+        )}
+        {detail.status==="approved"&&(
+          <div style={{padding:"10px",background:"#e8f5e9",borderRadius:"8px",
+            fontSize:"0.82rem",color:C.ok,textAlign:"center",fontWeight:700}}>
+            ✅ Approved by {detail.approvedBy}
           </div>
         )}
       </Modal>}
@@ -2849,9 +3057,9 @@ function SettingsModule({user,onLogout,onInstall}){
         <div style={{fontWeight:800,color:C.cream,fontSize:"1rem"}}>
           Kete Krachi Timber Recovery</div>
         <div style={{fontSize:"0.75rem",color:"rgba(245,237,214,0.7)",marginTop:"4px"}}>
-          Store Management System v7.0</div>
+          Store Management System v8.2</div>
         <div style={{fontSize:"0.7rem",color:"rgba(245,237,214,0.4)"}}>
-          Built by Anaase-Tech Ltd · {new Date().getFullYear()}</div>
+          Built by Anaase-Tech Ltd · {new Date().getFullYear()} · Smart Routing Enabled</div>
       </Card>
     </div>
   );
