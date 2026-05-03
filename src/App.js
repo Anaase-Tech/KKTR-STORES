@@ -100,6 +100,21 @@ async function hashPwd(pwd) {
     .map(b => b.toString(16).padStart(2,"0")).join("");
 }
 
+// ─── NOTIFICATION HELPER ─────────────────────────────────────────────────────
+async function sendNotification(db, fromUser, toDept, toUserId, toUserName, type, message, extra={}){
+  try {
+    await addDoc(collection(db,"notifications"),{
+      type, message,
+      toDept, toUserId, toUserName,
+      fromName:fromUser?.name||fromUser?.username||"System",
+      fromRole:fromUser?.role||"system",
+      read:false,
+      createdAt:serverTimestamp(),
+      ...extra
+    });
+  } catch(e){ console.log("Notification failed:",e.message); }
+}
+
 // ─── UTILS ────────────────────────────────────────────────────────────────────
 const today = () => new Date().toISOString().split("T")[0];
 const fmtDate = ts => {
@@ -1217,7 +1232,6 @@ function ReqsModule({user}){
   };
 
   const approveReq=async(id,req)=>{
-    // Double-check authority based on approverRole
     if(req.approverRole==="admin"&&!isAdmin)
       return showToast("Only Stores Admin can approve this request","danger");
     if(req.approverRole==="coo"&&!isCOO)
@@ -1229,6 +1243,16 @@ function ReqsModule({user}){
         approvedRole:req.approverRole,
         approvedAt:serverTimestamp()
       });
+      // History log
+      await addDoc(collection(db,"requisitionHistory"),{
+        reqId:id,item:req.item,dept:req.dept,
+        action:"approved",by:user?.name||"Unknown",
+        role:user?.role||"",time:serverTimestamp()
+      });
+      // Notify requester
+      await sendNotification(db,user,req.dept,req.userId,req.requestedBy,
+        "requisition",`✅ ${req.item} approved by ${user?.name||"Admin"}`,
+        {reqId:id,status:"approved"});
       showToast("✅ Approved!"); setDetail(null);
     } catch(e){ showToast("Failed: "+e.message,"danger"); }
   };
@@ -1246,6 +1270,16 @@ function ReqsModule({user}){
         adminNote:note,
         rejectedAt:serverTimestamp()
       });
+      // History log
+      await addDoc(collection(db,"requisitionHistory"),{
+        reqId:id,item:req.item,dept:req.dept,
+        action:"rejected",note,by:user?.name||"Unknown",
+        role:user?.role||"",time:serverTimestamp()
+      });
+      // Notify requester
+      await sendNotification(db,user,req.dept,req.userId,req.requestedBy,
+        "requisition",`❌ ${req.item} rejected${note?` — ${note}`:""}`,
+        {reqId:id,status:"rejected"});
       showToast("❌ Rejected"); setDetail(null);
     } catch(e){ showToast("Failed: "+e.message,"danger"); }
   };
@@ -1353,6 +1387,8 @@ function ReqsModule({user}){
               📝 <strong>Note:</strong> {detail.adminNote}</div>}
           </div>
         </div>
+        {/* Approval History Timeline */}
+        <ReqHistory reqId={detail.id}/>
         {canDecide(detail)&&(
           <ReqDecide req={detail} onApprove={approveReq} onReject={rejectReq}/>
         )}
@@ -1407,6 +1443,41 @@ function ReqForm({onSubmit,loading,user,isAdmin}){
     <Btn onClick={()=>onSubmit(f)} loading={loading}
       style={{width:"100%",justifyContent:"center"}}>Submit to {dest}</Btn>
   </div>);
+}
+
+// ─── REQUISITION HISTORY TIMELINE ────────────────────────────────────────────
+function ReqHistory({reqId}){
+  const [hist,setHist]=useState([]);
+  useEffect(()=>{
+    if(!reqId) return;
+    const q=query(collection(db,"requisitionHistory"),
+      where("reqId","==",reqId),orderBy("time","asc"));
+    return onSnapshot(q,s=>setHist(s.docs.map(d=>({id:d.id,...d.data()}))),()=>{});
+  },[reqId]);
+  if(!hist.length) return null;
+  return(
+    <div style={{marginBottom:"14px"}}>
+      <div style={{fontWeight:700,color:C.forest,fontSize:"0.78rem",
+        textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:"8px"}}>
+        📜 Approval Timeline</div>
+      {hist.map(h=>(
+        <div key={h.id} style={{display:"flex",gap:"10px",marginBottom:"8px"}}>
+          <div style={{width:"3px",background:h.action==="approved"?C.ok:C.danger,
+            borderRadius:"2px",flexShrink:0}}/>
+          <div style={{flex:1}}>
+            <div style={{fontWeight:700,fontSize:"0.82rem",
+              color:h.action==="approved"?C.ok:C.danger}}>
+              {h.action==="approved"?"✅ APPROVED":"❌ REJECTED"}</div>
+            <div style={{fontSize:"0.75rem",color:C.timber}}>{h.by} · {h.role}</div>
+            {h.note&&<div style={{fontSize:"0.72rem",color:"#999",marginTop:"2px"}}>
+              Note: {h.note}</div>}
+            <div style={{fontSize:"0.68rem",color:"#bbb"}}>
+              {h.time?.toDate?h.time.toDate().toLocaleString("en-GB"):"—"}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 // ─── RECEIPTS ─────────────────────────────────────────────────────────────────
@@ -1659,7 +1730,7 @@ function ChatThread({dept,user,onBack}){
   };
 
   return(
-    <div style={{display:"flex",flexDirection:"column",height:"calc(100vh - 60px)"}}>
+    <div style={{display:"flex",flexDirection:"column",height:"calc(100vh - 116px)"}}>
       <div style={{padding:"10px 12px",
         background:`linear-gradient(90deg,${C.forest},${C.bark})`,
         display:"flex",alignItems:"center",gap:"10px",flexShrink:0}}>
@@ -1678,6 +1749,7 @@ function ChatThread({dept,user,onBack}){
       </div>
 
       <div style={{flex:1,overflowY:"auto",padding:"12px",
+        paddingBottom:"80px",
         background:"#f5f0e8",minHeight:0}}>
         {msgs.length===0&&(
           <div style={{textAlign:"center",padding:"30px"}}>
@@ -1731,9 +1803,12 @@ function ChatThread({dept,user,onBack}){
         <div ref={bottomRef}/>
       </div>
 
-      <div style={{padding:"10px 12px 12px",background:C.white,
+      <div style={{position:"fixed",bottom:"56px",left:"50%",
+        transform:"translateX(-50%)",width:"100%",maxWidth:"480px",
+        padding:"10px 12px",background:C.white,
         borderTop:`1px solid ${C.border}`,display:"flex",
-        gap:"8px",flexShrink:0}}>
+        gap:"8px",zIndex:500,
+        paddingBottom:"calc(10px + env(safe-area-inset-bottom,0px))"}}>
         <input value={input} onChange={e=>setInput(e.target.value)}
           onKeyDown={e=>e.key==="Enter"&&send()}
           placeholder="Type a message…"
@@ -2797,10 +2872,19 @@ function SettingsModule({user,onLogout,onInstall}){
     if(!window.confirm("⚠ Clear ALL transactions, requisitions, attendance and receipts?")) return;
     setLoading(true);
     try {
+      // Main collections
       for(const col of ["transactions","requisitions","receipts","chopMoney",
-        "attendanceReports","attendance","passwordResets"]){
+        "attendanceReports","attendance","passwordResets",
+        "notifications","requisitionHistory"]){
         const s=await getDocs(collection(db,col));
         for(const d of s.docs) await deleteDoc(doc(db,col,d.id));
+      }
+      // Clear chat subcollections per department
+      for(const dept of DEPTS){
+        try {
+          const msgs=await getDocs(collection(db,"chats",dept,"messages"));
+          for(const d of msgs.docs) await deleteDoc(d.ref);
+        } catch(e2){}
       }
       showToast("✅ Factory reset complete.");
       setFactoryPwd("");
@@ -3057,9 +3141,9 @@ function SettingsModule({user,onLogout,onInstall}){
         <div style={{fontWeight:800,color:C.cream,fontSize:"1rem"}}>
           Kete Krachi Timber Recovery</div>
         <div style={{fontSize:"0.75rem",color:"rgba(245,237,214,0.7)",marginTop:"4px"}}>
-          Store Management System v8.2</div>
+          Store Management System v8.3</div>
         <div style={{fontSize:"0.7rem",color:"rgba(245,237,214,0.4)"}}>
-          Built by Anaase-Tech Ltd · {new Date().getFullYear()} · Smart Routing Enabled</div>
+          Built by Anaase-Tech Ltd · {new Date().getFullYear()} · </div>
       </Card>
     </div>
   );
@@ -3136,6 +3220,40 @@ function AppInner(){
 
   const login=u=>{ Sess.save(u); setUser(u); setTab("home"); };
   const logout=()=>{ Sess.clear(); setUser(null); };
+
+  // ─── GLOBAL REAL-TIME NOTIFICATION LISTENER ───────────────────────────────
+  useEffect(()=>{
+    if(!user) return;
+    // Listen for unread notifications addressed to this user
+    const q=query(collection(db,"notifications"),
+      where("toUserId","==",user.id),
+      where("read","==",false));
+    const unsub=onSnapshot(q,snap=>{
+      snap.docChanges().forEach(change=>{
+        if(change.type==="added"){
+          const n=change.doc.data();
+          // Show toast — mark read immediately to avoid repeat
+          updateDoc(doc(db,"notifications",change.doc.id),{read:true}).catch(()=>{});
+          // We'll display using a temporary DOM element since toast is per-component
+          const el=document.createElement("div");
+          el.innerText=`🔔 ${n.message}`;
+          Object.assign(el.style,{
+            position:"fixed",top:"70px",left:"50%",
+            transform:"translateX(-50%)",
+            background:"#1a2e1a",color:"#F5EDD6",
+            padding:"10px 20px",borderRadius:"30px",
+            fontWeight:700,fontSize:"0.88rem",
+            zIndex:9999,boxShadow:"0 4px 20px rgba(0,0,0,0.3)",
+            maxWidth:"90vw",textAlign:"center",
+            animation:"none",opacity:1
+          });
+          document.body.appendChild(el);
+          setTimeout(()=>{ try{document.body.removeChild(el);}catch{} },3500);
+        }
+      });
+    },()=>{});
+    return()=>unsub();
+  },[user]);
 
   if(!user) return <AuthScreen onLogin={login}/>;
 
