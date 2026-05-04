@@ -6,7 +6,7 @@ import {
   onSnapshot, serverTimestamp, enableNetwork, runTransaction, increment
 } from "firebase/firestore";
 import { getDatabase, ref, push, onValue, off, update } from "firebase/database";
-import { getStorage, ref as sRef, uploadString, getDownloadURL } from "firebase/storage";
+import { getStorage, ref as sRef, uploadBytes, getDownloadURL } from "firebase/storage";
 
 // ─── FIREBASE v7.0 — PROVEN WORKING CONFIG ───────────────────────────────────
 const firebaseConfig = {
@@ -533,18 +533,22 @@ function Dashboard({user,onNav}){
       where("status","==","pending")),s=>setStats(p=>({...p,pending:s.size})));
     const uP=onSnapshot(query(collection(db,"passwordResets"),
       where("status","==","pending")),s=>setStats(p=>({...p,pwdResets:s.size})));
-    const chatRef=ref(rtdb,"chat");
-    const hChat=s=>{
-      if(!s.val())return; let u=0;
-      Object.values(s.val()).forEach(t=>{
-        if(typeof t==="object") Object.values(t).forEach(m=>{
-          if(user.role==="admin"&&m.from!=="admin"&&!m.read) u++;
-        });
-      });
-      setStats(p=>({...p,unread:u}));
-    };
-    onValue(chatRef,hChat);
-    return()=>{uL();uI();uR();uP();off(chatRef,hChat);};
+
+    // v8.3 FIX: read unread count from Firestore chats — RTDB is stale/unused
+    // Track per-dept unread in a plain object outside state to avoid stale closure
+    const deptUnreadMap={};
+    const chatUnsubs=DEPTS.map(dept=>{
+      return onSnapshot(
+        query(collection(db,"chats",dept,"messages")),
+        snap=>{
+          deptUnreadMap[dept]=snap.docs.filter(d=>
+            d.data().from!=="admin"&&!d.data().read
+          ).length;
+          const total=Object.values(deptUnreadMap).reduce((s,n)=>s+n,0);
+          setStats(p=>({...p,unread:total}));
+        },()=>{ deptUnreadMap[dept]=0; });
+    });
+    return()=>{uL();uI();uR();uP();chatUnsubs.forEach(u=>u());};
   },[user]);
 
   const quickIssue=async()=>{
@@ -669,15 +673,18 @@ function DeptDashboard({user,onNav}){
   const [unread,setUnread]=useState(0);
   useEffect(()=>{
     const uR=onSnapshot(query(collection(db,"requisitions"),
-      where("userId","==",user.id),orderBy("createdAt","desc")),
-      s=>setReqs(s.docs.map(d=>({id:d.id,...d.data()}))));
-    const chatRef=ref(rtdb,`chat/${user.dept}`);
-    const h=s=>{
-      if(!s.val())return;
-      setUnread(Object.values(s.val()).filter(m=>m.from==="admin"&&!m.read).length);
-    };
-    onValue(chatRef,h);
-    return()=>{uR();off(chatRef,h);};
+      where("dept","==",user.dept),orderBy("createdAt","desc")),
+      s=>setReqs(s.docs.map(d=>({id:d.id,...d.data()}))),()=>{});
+    // v8.3 FIX: read unread from Firestore chats (messages from admin not yet read)
+    const uChat=onSnapshot(
+      query(collection(db,"chats",user.dept,"messages")),
+      snap=>{
+        const u=snap.docs.filter(d=>
+          d.data().from==="admin"&&!d.data().read
+        ).length;
+        setUnread(u);
+      },()=>setUnread(0));
+    return()=>{uR();uChat();};
   },[user]);
   return(
     <div style={{padding:"0 12px 80px"}}>
@@ -1195,18 +1202,17 @@ function ReqsModule({user}){
   useEffect(()=>{
     let q;
     if(isAdmin)
-      // Admin sees requests routed to them
       q=query(collection(db,"requisitions"),
         where("approverRole","==","admin"),orderBy("createdAt","desc"));
     else if(isCOO)
-      // COO sees escalated requests (from Admin)
       q=query(collection(db,"requisitions"),
         where("approverRole","==","coo"),orderBy("createdAt","desc"));
     else
-      // HR and dept heads see only their own
+      // Query by dept — no composite index needed, works immediately
       q=query(collection(db,"requisitions"),
-        where("userId","==",user.id),orderBy("createdAt","desc"));
-    return onSnapshot(q,s=>setReqs(s.docs.map(d=>({id:d.id,...d.data()}))));
+        where("dept","==",user.dept),orderBy("createdAt","desc"));
+    return onSnapshot(q,s=>setReqs(s.docs.map(d=>({id:d.id,...d.data()}))),
+      e=>{ console.log("Reqs query error:",e.message); });
   },[user,isAdmin,isCOO]);
 
   const submit=async(f)=>{
@@ -1501,10 +1507,17 @@ function ReceiptsModule({user}){
     setLoading(true);
     try {
       let imageUrl=null;
-      if(f.imageBase64){
-        const imgRef=sRef(storage,`receipts/${Date.now()}_${user.id}.jpg`);
-        await uploadString(imgRef,f.imageBase64,"data_url");
-        imageUrl=await getDownloadURL(imgRef);
+      if(f.imageBlob){
+        try {
+          showToast("📤 Uploading image…","info");
+          const imgRef=sRef(storage,`receipts/${Date.now()}_${user.id}.jpg`);
+          await uploadBytes(imgRef,f.imageBlob,{contentType:"image/jpeg"});
+          imageUrl=await getDownloadURL(imgRef);
+        } catch(uploadErr){
+          // Don't block save if image upload fails — save receipt without image
+          showToast("⚠ Image upload failed — saving without photo","warn");
+          imageUrl=null;
+        }
       }
       await addDoc(collection(db,"receipts"),{
         vendor:f.vendor||"",amount:f.amount||"",description:f.description||"",
@@ -1563,14 +1576,15 @@ function ReceiptsModule({user}){
   );
 }
 function ReceiptForm({onSave,loading}){
-  const [f,setF]=useState({vendor:"",amount:"",description:"",imageBase64:""});
+  const [f,setF]=useState({vendor:"",amount:"",description:"",imageBlob:null,imagePreview:""});
   const [imgL,setImgL]=useState(false);
   const handleImg=e=>{
     const file=e.target.files[0]; if(!file) return;
     setImgL(true);
-    const r=new FileReader();
-    r.onload=ev=>{setF(p=>({...p,imageBase64:ev.target.result}));setImgL(false);};
-    r.readAsDataURL(file);
+    // Store raw File object (Blob) for uploadBytes — much faster than base64
+    const preview=URL.createObjectURL(file);
+    setF(p=>({...p,imageBlob:file,imagePreview:preview}));
+    setImgL(false);
   };
   return(<div>
     <div style={{marginBottom:"12px"}}>
@@ -1578,22 +1592,24 @@ function ReceiptForm({onSave,loading}){
         justifyContent:"center",background:C.mist,border:`2px dashed ${C.border}`,
         borderRadius:"10px",padding:"16px",cursor:"pointer",minHeight:"80px"}}>
         {imgL?<div>Loading…</div>
-          :f.imageBase64
-            ?<img src={f.imageBase64} alt="preview"
+          :f.imagePreview
+            ?<img src={f.imagePreview} alt="preview"
                 style={{maxHeight:"140px",borderRadius:"8px",maxWidth:"100%"}}/>
             :<><div style={{fontSize:"2rem"}}>📷</div>
               <div style={{fontSize:"0.8rem",color:C.timber,fontWeight:700}}>
-                Tap to snap or upload</div></>}
+                Tap to snap or upload (optional)</div></>}
         <input type="file" accept="image/*" capture="environment"
           onChange={handleImg} style={{display:"none"}}/>
       </label>
     </div>
-    <Inp label="Vendor" value={f.vendor}
+    <Inp label="Vendor *" value={f.vendor}
       onChange={e=>setF({...f,vendor:e.target.value})} placeholder="Supplier name"/>
     <Inp label="Amount (GH₵)" type="number" value={f.amount}
       onChange={e=>setF({...f,amount:e.target.value})} placeholder="0.00"/>
     <Inp label="Description" value={f.description}
       onChange={e=>setF({...f,description:e.target.value})}/>
+    <div style={{fontSize:"0.72rem",color:"#aaa",marginBottom:"8px",textAlign:"center"}}>
+      Receipt saves instantly — photo uploads separately</div>
     <Btn onClick={()=>onSave(f)} loading={loading}
       style={{width:"100%",justifyContent:"center"}}>Save Receipt</Btn>
   </div>);
@@ -2673,7 +2689,7 @@ Rules: Be concise. Focus on inventory insights. Reply in plain text.`;
   };
 
   return(
-    <div style={{display:"flex",flexDirection:"column",height:"calc(100vh - 116px)",padding:"0 12px"}}>
+    <div style={{display:"flex",flexDirection:"column",height:"calc(100vh - 116px)",padding:"0 12px",overflow:"hidden"}}>
       <div style={{display:"flex",justifyContent:"space-between",
         alignItems:"center",paddingTop:"4px",marginBottom:"10px"}}>
         <div style={{fontWeight:800,fontSize:"1.2rem",color:C.forest}}>🤖 AI Assistant</div>
@@ -2709,7 +2725,9 @@ Rules: Be concise. Focus on inventory insights. Reply in plain text.`;
           ))}
         </div>
       )}
-      <div style={{display:"flex",gap:"8px",paddingBottom:"74px",paddingTop:"6px"}}>
+      <div style={{display:"flex",gap:"8px",paddingBottom:"4px",paddingTop:"6px",
+        paddingLeft:"12px",paddingRight:"12px",
+        position:"sticky",bottom:0,background:C.cream}}>
         <input value={input} onChange={e=>setInput(e.target.value)}
           onKeyDown={e=>e.key==="Enter"&&send()}
           placeholder="Ask about stock, alerts…"
@@ -2821,15 +2839,16 @@ function SettingsModule({user,onLogout,onInstall}){
             // Compress to JPEG at 80% quality
             const compressed=canvas.toDataURL("image/jpeg",0.8);
 
-            // Try Storage first, fall back to Firestore base64
+            // Convert base64 to Blob for uploadBytes
             let logoUrl=null;
             try {
+              const res=await fetch(compressed);
+              const blob=await res.blob();
               const imgRef=sRef(storage,"settings/logo.jpg");
-              await uploadString(imgRef,compressed,"data_url");
+              await uploadBytes(imgRef,blob,{contentType:"image/jpeg"});
               logoUrl=await getDownloadURL(imgRef);
             } catch(storageErr){
               // Storage failed — save compressed base64 directly to Firestore
-              // Compressed image is ~10-20KB, well within Firestore 1MB limit
               logoUrl=compressed;
             }
 
@@ -3122,6 +3141,27 @@ function SettingsModule({user,onLogout,onInstall}){
               style={{width:"100%",justifyContent:"center",marginBottom:"8px"}}>
               Add Default Lubricants</Btn>
           </Card>
+          <Card style={{border:`1.5px solid ${C.warn}`}}>
+            <div style={{fontWeight:800,color:C.warn,marginBottom:"8px"}}>
+              💬 Clear All Chat Messages</div>
+            <div style={{fontSize:"0.82rem",color:"#888",marginBottom:"12px"}}>
+              Deletes all messages from all department chats. Fixes stale unread counts.
+              Cannot be undone.</div>
+            <Btn onClick={async()=>{
+              if(!window.confirm("Delete all chat messages from all departments?")) return;
+              setLoading(true);
+              try {
+                for(const dept of DEPTS){
+                  const msgs=await getDocs(collection(db,"chats",dept,"messages"));
+                  for(const d of msgs.docs) await deleteDoc(d.ref);
+                }
+                showToast("✅ All chats cleared!");
+              } catch(e){ showToast("Failed: "+e.message,"danger"); }
+              setLoading(false);
+            }} loading={loading} color={C.warn}
+              style={{width:"100%",justifyContent:"center"}}>
+              🗑 Clear All Chats</Btn>
+          </Card>
           <Card style={{border:`1.5px solid ${C.danger}`}}>
             <div style={{fontWeight:800,color:C.danger,marginBottom:"8px"}}>⚠ Factory Reset</div>
             <div style={{fontSize:"0.82rem",color:"#888",marginBottom:"12px"}}>
@@ -3143,7 +3183,7 @@ function SettingsModule({user,onLogout,onInstall}){
         <div style={{fontSize:"0.75rem",color:"rgba(245,237,214,0.7)",marginTop:"4px"}}>
           Store Management System v8.3</div>
         <div style={{fontSize:"0.7rem",color:"rgba(245,237,214,0.4)"}}>
-          Built by Anaase-Tech Ltd · {new Date().getFullYear()} · </div>
+          Built by Anaase-Tech Ltd · {new Date().getFullYear()}.</div>
       </Card>
     </div>
   );
