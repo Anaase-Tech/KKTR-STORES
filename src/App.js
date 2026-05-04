@@ -739,16 +739,26 @@ function DeptDashboard({user,onNav}){
 }
 
 function HRDashboard({user,onNav}){
-  const [p,setP]=useState({chop:0,att:0,workers:0});
+  const [p,setP]=useState({reqs:0,chop:0,att:0,attRaw:0,workers:0});
   useEffect(()=>{
-    const uC=onSnapshot(query(collection(db,"chopMoney"),where("status","==","pending")),
+    // All single-field where queries — no composite index needed
+    const uR=onSnapshot(query(collection(db,"requisitions"),
+      where("dept","==",user.dept)),
+      s=>setP(x=>({...x,reqs:s.docs.filter(d=>d.data().status==="pending").length})));
+    const uC=onSnapshot(query(collection(db,"chopMoney"),
+      where("status","==","pending")),
       s=>setP(x=>({...x,chop:s.size})));
-    const uA=onSnapshot(query(collection(db,"attendanceReports"),where("status","==","pending")),
+    const uA=onSnapshot(query(collection(db,"attendanceReports"),
+      where("status","==","pending")),
       s=>setP(x=>({...x,att:s.size})));
+    const uAR=onSnapshot(query(collection(db,"attendance"),
+      where("status","==","pending")),
+      s=>setP(x=>({...x,attRaw:s.size})));
     const uW=onSnapshot(collection(db,"workers"),
       s=>setP(x=>({...x,workers:s.size})));
-    return()=>{uC();uA();uW();};
-  },[]);
+    return()=>{uR();uC();uA();uAR();uW();};
+  },[user.dept]);
+
   return(
     <div style={{padding:"0 12px 80px"}}>
       <div style={{background:`linear-gradient(135deg,${C.forest},${C.bark})`,
@@ -760,10 +770,12 @@ function HRDashboard({user,onNav}){
       </div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"10px",marginBottom:"12px"}}>
         {[
-          {icon:"💰",l:"Chop Money",v:p.chop,s:"pending approval",c:p.chop>0?C.warn:C.ok,action:()=>onNav("hr")},
-          {icon:"📅",l:"Attendance",v:p.att,s:"pending reports",c:p.att>0?C.warn:C.ok,action:()=>onNav("hr")},
-          {icon:"👥",l:"Staff Roster",v:p.workers,s:"total workers",c:C.sage,action:()=>onNav("hr")},
-          {icon:"💬",l:"Chat Admin",v:"→",s:"direct line",c:C.blue,action:()=>onNav("chat")},
+          {icon:"📋",l:"Pending Reqs",   v:p.reqs,  s:"my requests",        c:p.reqs>0?C.warn:C.ok,  action:()=>onNav("reqs")},
+          {icon:"💰",l:"Chop Money",     v:p.chop,  s:"pending approval",   c:p.chop>0?C.warn:C.ok,  action:()=>onNav("hr")},
+          {icon:"📅",l:"Att. Reports",   v:p.att,   s:"pending reports",    c:p.att>0?C.warn:C.ok,   action:()=>onNav("hr")},
+          {icon:"✅",l:"Daily Att.",     v:p.attRaw,s:"pending approval",   c:p.attRaw>0?C.warn:C.ok,action:()=>onNav("hr")},
+          {icon:"👥",l:"Staff Roster",   v:p.workers,s:"total workers",     c:C.sage,                 action:()=>onNav("hr")},
+          {icon:"💬",l:"Chat Admin",     v:"→",     s:"direct line",        c:C.blue,                 action:()=>onNav("chat")},
         ].map((s,i)=>(
           <Card key={i} style={{marginBottom:0,cursor:"pointer"}} onClick={s.action}>
             <div style={{fontSize:"1.6rem",marginBottom:"2px"}}>{s.icon}</div>
@@ -2052,13 +2064,18 @@ function HRModule({user}){
     <div style={{padding:"0 12px 80px"}}>
       <div style={{fontWeight:800,fontSize:"1.2rem",color:C.forest,
         marginBottom:"12px",paddingTop:"4px"}}>👥 HR Management</div>
-      <TabBar tabs={[{id:"roster",label:"Roster"},{id:"chop",label:"Chop $"},
-        {id:"attendance",label:"Attend."},{id:"attapprove",label:"Approve Att."}]}
-        active={tab} onSelect={setTab}/>
-      {tab==="roster"&&<StaffRoster user={user}/>}
-      {tab==="chop"&&<ChopMoney user={user}/>}
+      <TabBar tabs={[
+        {id:"roster",    label:"Roster"},
+        {id:"chop",      label:"Chop $"},
+        {id:"attendance",label:"Attend."},
+        {id:"attapprove",label:"Approve"},
+        {id:"reqs",      label:"Reqs"},
+      ]} active={tab} onSelect={setTab}/>
+      {tab==="roster"    &&<StaffRoster user={user}/>}
+      {tab==="chop"      &&<ChopMoney user={user}/>}
       {tab==="attendance"&&<AttendanceReports user={user}/>}
       {tab==="attapprove"&&<AttendanceApproval user={user}/>}
+      {tab==="reqs"      &&<ReqsModule user={user}/>}
     </div>
   );
 }
