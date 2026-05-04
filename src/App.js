@@ -1209,7 +1209,7 @@ function ReqsModule({user}){
   // v8.4 STRICT ROLES — use user.role only, never dept for authority
   const isAdmin = user.role === "admin";
   const isCOO   = user.role === "coo";
-  const isHR    = user.role === "hr";
+  const isHR    = user.role === "hr" || user.dept === "HR"; // v8.5
 
   // ROUTING RULE:
   // Admin creates → approverRole:"coo" → COO approves
@@ -1650,7 +1650,7 @@ function ReceiptForm({onSave,loading}){
 function ChatModule({user}){
   const [activeDept,setActiveDept]=useState(null);
   const isAdmin=user.role==="admin";
-  const isHR=user.role==="hr"; // v8.4 strict
+  const isHR=user.role==="hr"||user.dept==="HR"; // v8.5: role OR dept
 
   // STRICT CHAT RULES:
   // Admin → sees all departments, can message any
@@ -2059,7 +2059,7 @@ function AttendanceModule({user}){
 // ─── HR MODULE ────────────────────────────────────────────────────────────────
 function HRModule({user}){
   const [tab,setTab]=useState("roster");
-  const isHR=user.role==="hr"; // v8.4 strict
+  const isHR=user.role==="hr"||user.dept==="HR"; // v8.5: role OR dept
   return(
     <div style={{padding:"0 12px 80px"}}>
       <div style={{fontWeight:800,fontSize:"1.2rem",color:C.forest,
@@ -2084,7 +2084,7 @@ function HRModule({user}){
 function AttendanceApproval({user}){
   const [records,setRecords]=useState([]);
   const [toastEl,showToast]=useToast();
-  const isHR=user.role==="hr"; // v8.4: strict role check
+  const isHR=user.role==="hr"||user.dept==="HR"; // v8.5
 
   useEffect(()=>{
     return onSnapshot(query(collection(db,"attendance"),
@@ -2260,7 +2260,7 @@ function ChopMoney({user}){
   const [detail,setDetail]=useState(null);
   const [toastEl,showToast]=useToast();
   // v8.2: HR approves chop money, NOT admin
-  const isHR=user.role==="hr"; // v8.4 strict
+  const isHR=user.role==="hr"||user.dept==="HR"; // v8.5: role OR dept
   useEffect(()=>{
     return onSnapshot(collection(db,"chopMoney"),
       s=>{
@@ -3332,9 +3332,9 @@ function SettingsModule({user,onLogout,onInstall}){
         <div style={{fontWeight:800,color:C.cream,fontSize:"1rem"}}>
           Kete Krachi Timber Recovery</div>
         <div style={{fontSize:"0.75rem",color:"rgba(245,237,214,0.7)",marginTop:"4px"}}>
-          Store Management System v8.4</div>
+          Store Management System v8.5</div>
         <div style={{fontSize:"0.7rem",color:"rgba(245,237,214,0.4)"}}>
-          Built by Anaase-Tech Ltd · {new Date().getFullYear()} ·</div>
+          Built by Anaase-Tech Ltd · {new Date().getFullYear()}.</div>
       </Card>
     </div>
   );
@@ -3449,7 +3449,7 @@ function AppInner(){
   if(!user) return <AuthScreen onLogin={login}/>;
 
   const isAdmin=user.role==="admin";
-  const isHR=user.role==="hr"; // v8.4 strict
+  const isHR=user.role==="hr"||user.dept==="HR"; // v8.5: role OR dept
 
   const adminNav=[
     {id:"home",icon:"🏠",l:"Home"},{id:"lubes",icon:"🛢",l:"Lubes"},
