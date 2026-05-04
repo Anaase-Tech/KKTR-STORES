@@ -2245,9 +2245,12 @@ function ChopMoney({user}){
   // v8.2: HR approves chop money, NOT admin
   const isHR=user.role==="hr"; // v8.4 strict
   useEffect(()=>{
-    return onSnapshot(query(collection(db,"chopMoney"),orderBy("createdAt","desc")),
-      s=>setSubs(s.docs.map(d=>({id:d.id,...d.data()}))));
-  },[]);
+    return onSnapshot(collection(db,"chopMoney"),
+      s=>{
+        const all=s.docs.map(d=>({id:d.id,...d.data()}));
+        all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+        setSubs(all);
+      });  },[]);
   const decide=async(id,action)=>{
     if(!isHR){ showToast("Only HR can approve chop money","danger"); return; }
     await updateDoc(doc(db,"chopMoney",id),{
@@ -2342,50 +2345,136 @@ function AttendanceReports({user}){
   const [reports,setReports]=useState([]);
   const [detail,setDetail]=useState(null);
   const [toastEl,showToast]=useToast();
+
   useEffect(()=>{
-    return onSnapshot(query(collection(db,"attendanceReports"),orderBy("createdAt","desc")),
-      s=>setReports(s.docs.map(d=>({id:d.id,...d.data()}))));
+    return onSnapshot(collection(db,"attendanceReports"),
+      s=>{
+        const all=s.docs.map(d=>({id:d.id,...d.data()}));
+        all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+        setReports(all);
+      });
   },[]);
+
+  // Group by department so HR sees each dept's reports together
+  const byDept=DEPTS.reduce((a,d)=>{
+    a[d]=reports.filter(r=>r.dept===d);
+    return a;
+  },{});
+
   return(
     <div>
       {toastEl}
-      {reports.length===0&&<div style={{textAlign:"center",color:"#aaa",padding:"30px"}}>
-        No attendance reports yet.</div>}
-      {reports.map(r=>(
-        <Card key={r.id} style={{borderLeft:`4px solid ${r.status==="pending"?C.warn:C.ok}`,
-          marginBottom:"8px",cursor:"pointer"}} onClick={()=>setDetail(r)}>
-          <div style={{display:"flex",justifyContent:"space-between"}}>
-            <div>
-              <div style={{fontWeight:800,color:C.forest}}>{r.dept}</div>
-              <div style={{fontSize:"0.75rem",color:"#888"}}>{r.month} · {r.submittedBy}</div>
+      {reports.length===0&&(
+        <div style={{textAlign:"center",color:"#aaa",padding:"30px"}}>
+          No attendance reports submitted yet.</div>
+      )}
+
+      {DEPTS.map(dept=>{
+        const deptReports=byDept[dept]||[];
+        if(!deptReports.length) return null;
+        const pendingCount=deptReports.filter(r=>r.status==="pending").length;
+        return(
+          <div key={dept}>
+            {/* Department header */}
+            <div style={{fontWeight:700,color:C.forest,fontSize:"0.82rem",
+              textTransform:"uppercase",letterSpacing:"0.08em",
+              margin:"14px 0 6px",display:"flex",
+              justifyContent:"space-between",alignItems:"center"}}>
+              <span>🏢 {dept} ({deptReports.length})</span>
+              {pendingCount>0&&(
+                <span style={{background:C.warn,color:C.white,
+                  borderRadius:"10px",padding:"2px 8px",
+                  fontSize:"0.68rem",fontWeight:800}}>
+                  {pendingCount} pending</span>
+              )}
             </div>
-            <Badge color={r.status==="pending"?C.warn:C.ok}>{r.status.toUpperCase()}</Badge>
+            {deptReports.map(r=>(
+              <Card key={r.id}
+                style={{borderLeft:`4px solid ${r.status==="pending"?C.warn:C.ok}`,
+                  marginBottom:"8px",cursor:"pointer"}}
+                onClick={()=>setDetail(r)}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div>
+                    <div style={{fontWeight:800,color:C.forest}}>{r.month}</div>
+                    <div style={{fontSize:"0.72rem",color:"#888"}}>
+                      Submitted by {r.submittedBy}</div>
+                    {r.summary&&(
+                      <div style={{fontSize:"0.72rem",color:C.timber,marginTop:"2px"}}>
+                        {r.summary.length} worker{r.summary.length!==1?"s":""} ·
+                        Total GH₵{(r.summary.reduce((s,w)=>s+(w.chopMoney||0),0)).toFixed(0)}
+                      </div>
+                    )}
+                  </div>
+                  <Badge color={r.status==="pending"?C.warn:C.ok}>
+                    {(r.status||"pending").toUpperCase()}</Badge>
+                </div>
+              </Card>
+            ))}
           </div>
-        </Card>
-      ))}
-      {detail&&<Modal title="Attendance Report" onClose={()=>setDetail(null)}>
-        <div style={{fontWeight:800,color:C.forest,marginBottom:"4px"}}>
-          {detail.dept} — {detail.month}</div>
-        {(detail.summary||[]).map((w,i)=>(
-          <div key={i} style={{display:"flex",justifyContent:"space-between",
-            padding:"6px 0",borderBottom:`1px dashed ${C.border}`,fontSize:"0.82rem"}}>
-            <span style={{flex:2}}>{w.name}</span>
-            <span style={{color:C.ok,flex:1,textAlign:"center"}}>{w.present}✓</span>
-            <span style={{color:C.danger,flex:1,textAlign:"center"}}>{w.absent}✗</span>
-            <span style={{color:C.gold,fontWeight:700,flex:1,textAlign:"right"}}>
-              GH₵{w.chopMoney}</span>
+        );
+      })}
+
+      {detail&&(
+        <Modal title="📊 Attendance Report" onClose={()=>setDetail(null)}>
+          <div style={{fontWeight:800,color:C.forest,marginBottom:"4px",fontSize:"1rem"}}>
+            {detail.dept} — {detail.month}</div>
+          <div style={{fontSize:"0.75rem",color:"#888",marginBottom:"12px"}}>
+            Submitted by {detail.submittedBy}</div>
+
+          {/* Summary table header */}
+          <div style={{display:"flex",justifyContent:"space-between",
+            padding:"4px 0 8px",borderBottom:`2px solid ${C.border}`,
+            fontSize:"0.72rem",fontWeight:700,color:C.timber,
+            textTransform:"uppercase",letterSpacing:"0.05em"}}>
+            <span style={{flex:2}}>Worker</span>
+            <span style={{flex:1,textAlign:"center",color:C.ok}}>Present</span>
+            <span style={{flex:1,textAlign:"center",color:C.danger}}>Absent</span>
+            <span style={{flex:1,textAlign:"right",color:C.gold}}>Chop</span>
           </div>
-        ))}
-        {detail.status==="pending"&&(
-          <Btn onClick={async()=>{
-            await updateDoc(doc(db,"attendanceReports",detail.id),{
-              status:"approved",approvedBy:user?.name||user?.username||"Admin",approvedAt:serverTimestamp()
-            });
-            showToast("✅ Acknowledged!"); setDetail(null);
-          }} color={C.ok} style={{width:"100%",justifyContent:"center",marginTop:"12px"}}>
-            ✓ Acknowledge & File</Btn>
-        )}
-      </Modal>}
+
+          {(detail.summary||[]).map((w,i)=>(
+            <div key={i} style={{display:"flex",justifyContent:"space-between",
+              alignItems:"center",padding:"7px 0",
+              borderBottom:`1px dashed ${C.border}`,fontSize:"0.82rem"}}>
+              <span style={{flex:2,fontWeight:600,color:C.forest}}>{w.name}</span>
+              <span style={{flex:1,textAlign:"center",color:C.ok,fontWeight:700}}>
+                {w.present}✓</span>
+              <span style={{flex:1,textAlign:"center",color:C.danger,fontWeight:700}}>
+                {w.absent}✗</span>
+              <span style={{flex:1,textAlign:"right",color:C.gold,fontWeight:800}}>
+                GH₵{w.chopMoney||0}</span>
+            </div>
+          ))}
+
+          {/* Totals row */}
+          {detail.summary&&detail.summary.length>0&&(
+            <div style={{display:"flex",justifyContent:"space-between",
+              padding:"8px 0 4px",fontSize:"0.82rem",fontWeight:800,
+              borderTop:`2px solid ${C.border}`,marginTop:"4px"}}>
+              <span style={{flex:2,color:C.forest}}>TOTAL</span>
+              <span style={{flex:1,textAlign:"center",color:C.ok}}>
+                {detail.summary.reduce((s,w)=>s+(w.present||0),0)}✓</span>
+              <span style={{flex:1,textAlign:"center",color:C.danger}}>
+                {detail.summary.reduce((s,w)=>s+(w.absent||0),0)}✗</span>
+              <span style={{flex:1,textAlign:"right",color:C.gold}}>
+                GH₵{detail.summary.reduce((s,w)=>s+(w.chopMoney||0),0).toFixed(0)}</span>
+            </div>
+          )}
+
+          {detail.status==="pending"&&(
+            <Btn onClick={async()=>{
+              await updateDoc(doc(db,"attendanceReports",detail.id),{
+                status:"approved",
+                approvedBy:user?.name||user?.username||"HR",
+                approvedAt:serverTimestamp()
+              });
+              showToast("✅ Acknowledged & Filed!"); setDetail(null);
+            }} color={C.ok}
+              style={{width:"100%",justifyContent:"center",marginTop:"12px"}}>
+              ✓ Acknowledge & File</Btn>
+          )}
+        </Modal>
+      )}
     </div>
   );
 }
