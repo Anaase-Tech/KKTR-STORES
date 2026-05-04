@@ -43,6 +43,7 @@ const getFirstName = u => (u?.name||u?.username||"User").split(" ")[0];
 // ─── ROLE-BASED PERMISSIONS ───────────────────────────────────────────────────
 const PERMISSIONS = {
   admin:         ["all"],
+  coo:           ["reqs_approve_coo","reqs_create","chat","reports"],
   store_manager: ["lubes_read","lubes_write","items_read","items_write",
                   "transactions","issue_stock","receipts","reports","chat","reqs_view"],
   hr:            ["attendance","chop_money","staff_management","chat","reqs_create","reqs_view"],
@@ -673,8 +674,12 @@ function DeptDashboard({user,onNav}){
   const [unread,setUnread]=useState(0);
   useEffect(()=>{
     const uR=onSnapshot(query(collection(db,"requisitions"),
-      where("dept","==",user.dept),orderBy("createdAt","desc")),
-      s=>setReqs(s.docs.map(d=>({id:d.id,...d.data()}))),()=>{});
+      where("dept","==",user.dept)),
+      s=>{
+        const all=s.docs.map(d=>({id:d.id,...d.data()}));
+        all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+        setReqs(all);
+      },()=>{});
     // v8.3 FIX: read unread from Firestore chats (messages from admin not yet read)
     const uChat=onSnapshot(
       query(collection(db,"chats",user.dept,"messages")),
@@ -790,8 +795,10 @@ function LubesModule({user}){
     const uL=onSnapshot(collection(db,"lubricants"),
       s=>setLubes(s.docs.map(d=>({id:d.id,...d.data()}))));
     const uT=onSnapshot(query(collection(db,"transactions"),
-      where("type","==","lube"),orderBy("createdAt","desc")),
-      s=>setTxs(s.docs.map(d=>({id:d.id,...d.data()}))));
+      where("type","==","lube")),
+      s=>{ const all=s.docs.map(d=>({id:d.id,...d.data()}));
+           all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+           setTxs(all); });
     return()=>{uL();uT();};
   },[]);
 
@@ -996,8 +1003,10 @@ function StoresModule({user}){
     const uI=onSnapshot(collection(db,"storeItems"),
       s=>setItems(s.docs.map(d=>({id:d.id,...d.data()}))));
     const uT=onSnapshot(query(collection(db,"transactions"),
-      where("type","==","store"),orderBy("createdAt","desc")),
-      s=>setTxs(s.docs.map(d=>({id:d.id,...d.data()}))));
+      where("type","==","store")),
+      s=>{ const all=s.docs.map(d=>({id:d.id,...d.data()}));
+           all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+           setTxs(all); });
     return()=>{uI();uT();};
   },[]);
 
@@ -1185,10 +1194,10 @@ function ReqsModule({user}){
   const [tab,setTab]=useState("pending");
   const [loading,setLoading]=useState(false);
 
-  // v8.2.2 STRICT ROLE DEFINITIONS
-  const isAdmin=user.role==="admin";
-  const isHR=user.dept==="HR"||user.role==="hr";
-  const isCOO=user.dept==="Administration"&&!isAdmin; // COO = Administration dept, not the admin account
+  // v8.4 STRICT ROLES — use user.role only, never dept for authority
+  const isAdmin = user.role === "admin";
+  const isCOO   = user.role === "coo";
+  const isHR    = user.role === "hr";
 
   // ROUTING RULE:
   // Admin creates → approverRole:"coo" → COO approves
@@ -1202,18 +1211,20 @@ function ReqsModule({user}){
   useEffect(()=>{
     let q;
     if(isAdmin)
-      q=query(collection(db,"requisitions"),
-        where("approverRole","==","admin"),orderBy("createdAt","desc"));
+      // No orderBy — avoids composite index. Sort client-side.
+      q=query(collection(db,"requisitions"),where("approverRole","==","admin"));
     else if(isCOO)
-      q=query(collection(db,"requisitions"),
-        where("approverRole","==","coo"),orderBy("createdAt","desc"));
+      q=query(collection(db,"requisitions"),where("approverRole","==","coo"));
     else
-      // Query by dept — no composite index needed, works immediately
-      q=query(collection(db,"requisitions"),
-        where("dept","==",user.dept),orderBy("createdAt","desc"));
-    return onSnapshot(q,s=>setReqs(s.docs.map(d=>({id:d.id,...d.data()}))),
-      e=>{ console.log("Reqs query error:",e.message); });
-  },[user,isAdmin,isCOO]);
+      // Dept/HR see their dept's requests
+      q=query(collection(db,"requisitions"),where("dept","==",user.dept));
+    return onSnapshot(q,s=>{
+      const all=s.docs.map(d=>({id:d.id,...d.data()}));
+      // Sort client-side: newest first, no Firestore index needed
+      all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+      setReqs(all);
+    },e=>console.log("Reqs:",e.message));
+  },[user.role,user.dept,isAdmin,isCOO]);
 
   const submit=async(f)=>{
     if(!f.item||!f.qty) return showToast("Item and quantity required","warn");
@@ -1457,8 +1468,12 @@ function ReqHistory({reqId}){
   useEffect(()=>{
     if(!reqId) return;
     const q=query(collection(db,"requisitionHistory"),
-      where("reqId","==",reqId),orderBy("time","asc"));
-    return onSnapshot(q,s=>setHist(s.docs.map(d=>({id:d.id,...d.data()}))),()=>{});
+      where("reqId","==",reqId));
+    return onSnapshot(q,s=>{
+      const all=s.docs.map(d=>({id:d.id,...d.data()}));
+      all.sort((a,b)=>(a.time?.seconds||0)-(b.time?.seconds||0)); // oldest first
+      setHist(all);
+    },()=>{});
   },[reqId]);
   if(!hist.length) return null;
   return(
@@ -1495,11 +1510,15 @@ function ReceiptsModule({user}){
   const [loading,setLoading]=useState(false);
 
   useEffect(()=>{
-    const q=user.role==="admin"||user.role==="hr"
-      ?query(collection(db,"receipts"),orderBy("createdAt","desc"))
-      :query(collection(db,"receipts"),where("dept","==",user.dept),
-          orderBy("createdAt","desc"));
-    return onSnapshot(q,s=>setReceipts(s.docs.map(d=>({id:d.id,...d.data()}))));
+    const isAdminOrHR=user.role==="admin"||user.role==="hr";
+    const q=isAdminOrHR
+      ?query(collection(db,"receipts"))
+      :query(collection(db,"receipts"),where("dept","==",user.dept));
+    return onSnapshot(q,s=>{
+      const all=s.docs.map(d=>({id:d.id,...d.data()}));
+      all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+      setReceipts(all);
+    },e=>console.log("Receipts:",e.message));
   },[user]);
 
   const save=async(f)=>{
@@ -1619,7 +1638,7 @@ function ReceiptForm({onSave,loading}){
 function ChatModule({user}){
   const [activeDept,setActiveDept]=useState(null);
   const isAdmin=user.role==="admin";
-  const isHR=user.dept==="HR"||user.role==="hr";
+  const isHR=user.role==="hr"; // v8.4 strict
 
   // STRICT CHAT RULES:
   // Admin → sees all departments, can message any
@@ -2028,7 +2047,7 @@ function AttendanceModule({user}){
 // ─── HR MODULE ────────────────────────────────────────────────────────────────
 function HRModule({user}){
   const [tab,setTab]=useState("roster");
-  const isHR=user.dept==="HR"||user.role==="hr";
+  const isHR=user.role==="hr"; // v8.4 strict
   return(
     <div style={{padding:"0 12px 80px"}}>
       <div style={{fontWeight:800,fontSize:"1.2rem",color:C.forest,
@@ -2048,14 +2067,16 @@ function HRModule({user}){
 function AttendanceApproval({user}){
   const [records,setRecords]=useState([]);
   const [toastEl,showToast]=useToast();
-  const isHR=user.dept==="HR"||user.role==="hr";
+  const isHR=user.role==="hr"; // v8.4: strict role check
 
   useEffect(()=>{
-    // HR sees all pending attendance records across all depts
     return onSnapshot(query(collection(db,"attendance"),
-      where("status","==","pending"),orderBy("createdAt","desc")),
-      s=>setRecords(s.docs.map(d=>({id:d.id,...d.data()}))),
-      ()=>{});
+      where("status","==","pending")),
+      s=>{
+        const all=s.docs.map(d=>({id:d.id,...d.data()}));
+        all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+        setRecords(all);
+      },()=>{});
   },[]);
 
   const approveRecord=async(id)=>{
@@ -2222,7 +2243,7 @@ function ChopMoney({user}){
   const [detail,setDetail]=useState(null);
   const [toastEl,showToast]=useToast();
   // v8.2: HR approves chop money, NOT admin
-  const isHR=user.dept==="HR"||user.role==="hr";
+  const isHR=user.role==="hr"; // v8.4 strict
   useEffect(()=>{
     return onSnapshot(query(collection(db,"chopMoney"),orderBy("createdAt","desc")),
       s=>setSubs(s.docs.map(d=>({id:d.id,...d.data()}))));
@@ -2392,10 +2413,10 @@ function ReportsModule({user}){
     Promise.all([
       getDocs(collection(db,"lubricants")),
       getDocs(collection(db,"storeItems")),
-      getDocs(query(collection(db,"transactions"),where("type","==","lube"),orderBy("createdAt","desc"))),
-      getDocs(query(collection(db,"transactions"),where("type","==","store"),orderBy("createdAt","desc"))),
-      getDocs(query(collection(db,"requisitions"),orderBy("createdAt","desc"))),
-      getDocs(query(collection(db,"receipts"),orderBy("createdAt","desc"))),
+      getDocs(query(collection(db,"transactions"),where("type","==","lube"))),
+      getDocs(query(collection(db,"transactions"),where("type","==","store"))),
+      getDocs(collection(db,"requisitions")),
+      getDocs(collection(db,"receipts")),
     ]).then(([l,i,lt,st,r,rc])=>{
       setData({
         lubes:l.docs.map(d=>({id:d.id,...d.data()})),
@@ -3038,6 +3059,7 @@ function SettingsModule({user,onLogout,onInstall}){
                       <option value="dept">Dept Head</option>
                       <option value="store_manager">Store Manager</option>
                       <option value="hr">HR</option>
+                      <option value="coo">COO</option>
                       <option value="admin">Admin</option>
                     </select>
                     <Btn sm onClick={()=>{setResetTarget(u);setNewPwd("");}}
@@ -3141,6 +3163,29 @@ function SettingsModule({user,onLogout,onInstall}){
               style={{width:"100%",justifyContent:"center",marginBottom:"8px"}}>
               Add Default Lubricants</Btn>
           </Card>
+          <Card style={{border:`1.5px solid ${C.blue}`}}>
+            <div style={{fontWeight:800,color:C.blue,marginBottom:"8px"}}>
+              🔧 Fix Old Data (Run Once)</div>
+            <div style={{fontSize:"0.82rem",color:"#888",marginBottom:"12px"}}>
+              Adds missing approverRole to old requisitions so they appear correctly.</div>
+            <Btn onClick={async()=>{
+              setLoading(true);
+              try {
+                const snap=await getDocs(collection(db,"requisitions"));
+                let fixed=0;
+                for(const d of snap.docs){
+                  if(!d.data().approverRole){
+                    await updateDoc(doc(db,"requisitions",d.id),{approverRole:"admin"});
+                    fixed++;
+                  }
+                }
+                showToast(`✅ Fixed ${fixed} old requisitions!`);
+              } catch(e){ showToast("Failed: "+e.message,"danger"); }
+              setLoading(false);
+            }} loading={loading} color={C.blue}
+              style={{width:"100%",justifyContent:"center"}}>
+              🔧 Migrate Old Requisitions</Btn>
+          </Card>
           <Card style={{border:`1.5px solid ${C.warn}`}}>
             <div style={{fontWeight:800,color:C.warn,marginBottom:"8px"}}>
               💬 Clear All Chat Messages</div>
@@ -3181,9 +3226,9 @@ function SettingsModule({user,onLogout,onInstall}){
         <div style={{fontWeight:800,color:C.cream,fontSize:"1rem"}}>
           Kete Krachi Timber Recovery</div>
         <div style={{fontSize:"0.75rem",color:"rgba(245,237,214,0.7)",marginTop:"4px"}}>
-          Store Management System v8.3</div>
+          Store Management System v8.4</div>
         <div style={{fontSize:"0.7rem",color:"rgba(245,237,214,0.4)"}}>
-          Built by Anaase-Tech Ltd · {new Date().getFullYear()}.</div>
+          Built by Anaase-Tech Ltd · {new Date().getFullYear()} ·</div>
       </Card>
     </div>
   );
@@ -3298,7 +3343,7 @@ function AppInner(){
   if(!user) return <AuthScreen onLogin={login}/>;
 
   const isAdmin=user.role==="admin";
-  const isHR=user.dept==="HR";
+  const isHR=user.role==="hr"; // v8.4 strict
 
   const adminNav=[
     {id:"home",icon:"🏠",l:"Home"},{id:"lubes",icon:"🛢",l:"Lubes"},
