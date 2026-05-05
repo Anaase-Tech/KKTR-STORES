@@ -581,7 +581,7 @@ function Dashboard({user,onNav}){
   };
 
   if(user.role==="dept") return <DeptDashboard user={user} onNav={onNav}/>;
-  if(user.role==="hr"||user.dept==="HR") return <HRDashboard user={user} onNav={onNav}/>;
+  if(user.role==="hr") return <HRDashboard user={user} onNav={onNav}/>;
 
   const dStr=new Date().toLocaleDateString("en-GB",
     {weekday:"long",day:"numeric",month:"long"});
@@ -1209,7 +1209,7 @@ function ReqsModule({user}){
   // v8.4 STRICT ROLES — use user.role only, never dept for authority
   const isAdmin = user.role === "admin";
   const isCOO   = user.role === "coo";
-  const isHR    = user.role === "hr" || user.dept === "HR"; // v8.5
+  const isHR    = user.role === "hr"; // v8.6 strict
 
   // ROUTING RULE:
   // Admin creates → approverRole:"coo" → COO approves
@@ -1221,21 +1221,50 @@ function ReqsModule({user}){
   // HR/Dept → only their own submissions
 
   useEffect(()=>{
-    let q;
-    if(isAdmin)
-      // No orderBy — avoids composite index. Sort client-side.
-      q=query(collection(db,"requisitions"),where("approverRole","==","admin"));
-    else if(isCOO)
-      q=query(collection(db,"requisitions"),where("approverRole","==","coo"));
-    else
-      // Dept/HR see their dept's requests
-      q=query(collection(db,"requisitions"),where("dept","==",user.dept));
-    return onSnapshot(q,s=>{
-      const all=s.docs.map(d=>({id:d.id,...d.data()}));
-      // Sort client-side: newest first, no Firestore index needed
-      all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
-      setReqs(all);
-    },e=>console.log("Reqs:",e.message));
+    let unsub;
+    if(isAdmin){
+      // Admin sees:
+      // 1. All reqs routed to them (approverRole=="admin") — to approve
+      // 2. Their own submitted reqs (dept=="Administration") — to track status
+      // Run two queries, merge client-side
+      const results={incoming:[],own:[]};
+      const merge=()=>{
+        const combined=[...results.incoming,...results.own];
+        // Deduplicate by id
+        const seen=new Set();
+        const deduped=combined.filter(r=>{ if(seen.has(r.id)) return false; seen.add(r.id); return true; });
+        deduped.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+        setReqs(deduped);
+      };
+      const u1=onSnapshot(query(collection(db,"requisitions"),
+        where("approverRole","==","admin")),
+        s=>{ results.incoming=s.docs.map(d=>({id:d.id,...d.data()})); merge(); },
+        e=>console.log("Reqs q1:",e.message));
+      const u2=onSnapshot(query(collection(db,"requisitions"),
+        where("dept","==",user.dept)),
+        s=>{ results.own=s.docs.map(d=>({id:d.id,...d.data()})); merge(); },
+        e=>console.log("Reqs q2:",e.message));
+      unsub=()=>{ u1(); u2(); };
+    } else if(isCOO){
+      const u=onSnapshot(query(collection(db,"requisitions"),
+        where("approverRole","==","coo")),
+        s=>{
+          const all=s.docs.map(d=>({id:d.id,...d.data()}));
+          all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+          setReqs(all);
+        },e=>console.log("Reqs COO:",e.message));
+      unsub=u;
+    } else {
+      const u=onSnapshot(query(collection(db,"requisitions"),
+        where("dept","==",user.dept)),
+        s=>{
+          const all=s.docs.map(d=>({id:d.id,...d.data()}));
+          all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+          setReqs(all);
+        },e=>console.log("Reqs dept:",e.message));
+      unsub=u;
+    }
+    return()=>unsub&&unsub();
   },[user.role,user.dept,isAdmin,isCOO]);
 
   const submit=async(f)=>{
@@ -1537,27 +1566,33 @@ function ReceiptsModule({user}){
     if(!f.vendor&&!f.amount) return showToast("Add vendor or amount","warn");
     setLoading(true);
     try {
-      let imageUrl=null;
-      if(f.imageBlob){
-        try {
-          showToast("📤 Uploading image…","info");
-          const imgRef=sRef(storage,`receipts/${Date.now()}_${user.id}.jpg`);
-          await uploadBytes(imgRef,f.imageBlob,{contentType:"image/jpeg"});
-          imageUrl=await getDownloadURL(imgRef);
-        } catch(uploadErr){
-          // Don't block save if image upload fails — save receipt without image
-          showToast("⚠ Image upload failed — saving without photo","warn");
-          imageUrl=null;
-        }
-      }
-      await addDoc(collection(db,"receipts"),{
+      // STEP 1: Save receipt text data immediately — never wait on image
+      const docRef=await addDoc(collection(db,"receipts"),{
         vendor:f.vendor||"",amount:f.amount||"",description:f.description||"",
-        imageUrl:imageUrl||null,recordedBy:user?.name||user?.username||"Unknown",
+        imageUrl:null,
+        recordedBy:user?.name||user?.username||"Unknown",
         dept:user.dept,createdAt:serverTimestamp()
       });
-      showToast("✅ Receipt saved!"); setModal(false);
-    } catch(e){ showToast("Failed: "+e.message,"danger"); }
-    setLoading(false);
+      showToast("✅ Receipt saved!");
+      setModal(false);
+      setLoading(false);
+
+      // STEP 2: Upload image in background if provided — update doc when done
+      if(f.imageBlob){
+        try {
+          const imgRef=sRef(storage,`receipts/${docRef.id}.jpg`);
+          await uploadBytes(imgRef,f.imageBlob,{contentType:"image/jpeg"});
+          const imageUrl=await getDownloadURL(imgRef);
+          await updateDoc(doc(db,"receipts",docRef.id),{imageUrl});
+        } catch(uploadErr){
+          console.log("Image upload failed:",uploadErr.message);
+          // Receipt already saved — image just won't show
+        }
+      }
+    } catch(e){
+      showToast("Failed: "+e.message,"danger");
+      setLoading(false);
+    }
   };
 
   return(
@@ -1650,7 +1685,7 @@ function ReceiptForm({onSave,loading}){
 function ChatModule({user}){
   const [activeDept,setActiveDept]=useState(null);
   const isAdmin=user.role==="admin";
-  const isHR=user.role==="hr"||user.dept==="HR"; // v8.5: role OR dept
+  const isHR=user.role==="hr"; // v8.6 strict
 
   // STRICT CHAT RULES:
   // Admin → sees all departments, can message any
@@ -2059,7 +2094,7 @@ function AttendanceModule({user}){
 // ─── HR MODULE ────────────────────────────────────────────────────────────────
 function HRModule({user}){
   const [tab,setTab]=useState("roster");
-  const isHR=user.role==="hr"||user.dept==="HR"; // v8.5: role OR dept
+  const isHR=user.role==="hr"; // v8.6 strict
   return(
     <div style={{padding:"0 12px 80px"}}>
       <div style={{fontWeight:800,fontSize:"1.2rem",color:C.forest,
@@ -2084,7 +2119,7 @@ function HRModule({user}){
 function AttendanceApproval({user}){
   const [records,setRecords]=useState([]);
   const [toastEl,showToast]=useToast();
-  const isHR=user.role==="hr"||user.dept==="HR"; // v8.5
+  const isHR=user.role==="hr"; // v8.6 strict
 
   useEffect(()=>{
     return onSnapshot(query(collection(db,"attendance"),
@@ -2260,7 +2295,7 @@ function ChopMoney({user}){
   const [detail,setDetail]=useState(null);
   const [toastEl,showToast]=useToast();
   // v8.2: HR approves chop money, NOT admin
-  const isHR=user.role==="hr"||user.dept==="HR"; // v8.5: role OR dept
+  const isHR=user.role==="hr"; // v8.6 strict
   useEffect(()=>{
     return onSnapshot(collection(db,"chopMoney"),
       s=>{
@@ -3332,9 +3367,9 @@ function SettingsModule({user,onLogout,onInstall}){
         <div style={{fontWeight:800,color:C.cream,fontSize:"1rem"}}>
           Kete Krachi Timber Recovery</div>
         <div style={{fontSize:"0.75rem",color:"rgba(245,237,214,0.7)",marginTop:"4px"}}>
-          Store Management System v8.5</div>
+          Store Management System v8.6</div>
         <div style={{fontSize:"0.7rem",color:"rgba(245,237,214,0.4)"}}>
-          Built by Anaase-Tech Ltd · {new Date().getFullYear()}.</div>
+          Built by Anaase-Tech Ltd · {new Date().getFullYear()} ·</div>
       </Card>
     </div>
   );
@@ -3449,7 +3484,7 @@ function AppInner(){
   if(!user) return <AuthScreen onLogin={login}/>;
 
   const isAdmin=user.role==="admin";
-  const isHR=user.role==="hr"||user.dept==="HR"; // v8.5: role OR dept
+  const isHR=user.role==="hr"; // v8.6 strict
 
   const adminNav=[
     {id:"home",icon:"🏠",l:"Home"},{id:"lubes",icon:"🛢",l:"Lubes"},
