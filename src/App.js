@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, Component } from "react";
 import { initializeApp, getApps } from "firebase/app";
 import {
-  initializeFirestore, doc, setDoc, getDoc, getDocs, addDoc,
+  initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
+  doc, setDoc, getDoc, getDocs, addDoc,
   updateDoc, deleteDoc, collection, query, where, orderBy,
   onSnapshot, serverTimestamp, enableNetwork, runTransaction, increment
 } from "firebase/firestore";
@@ -21,14 +22,57 @@ const firebaseConfig = {
 
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
 
-// PROVEN WORKING — long polling for Ghana mobile networks
-const db = initializeFirestore(app, {
-  experimentalForceLongPolling: true,
-  useFetchStreams: false
-});
+// ─── OFFLINE-FIRST FIRESTORE (v9) ─────────────────────────────────────────────
+// persistentLocalCache = data survives network loss, app restart, page refresh
+let db;
+try {
+  db = initializeFirestore(app, {
+    localCache: persistentLocalCache({
+      tabManager: persistentMultipleTabManager()
+    })
+  });
+} catch(e) {
+  // Fallback for browsers that don't support IndexedDB persistence
+  db = initializeFirestore(app, {
+    experimentalForceLongPolling: true,
+    useFetchStreams: false
+  });
+}
 const rtdb = getDatabase(app);
 const storage = getStorage(app);
-enableNetwork(db).catch(e => console.log("enableNetwork:", e.message));
+
+// ─── OFFLINE QUEUE ENGINE ─────────────────────────────────────────────────────
+const OQ_KEY = "kktr_offlineQueue";
+
+function queueOffline(collectionName, data) {
+  try {
+    const q = JSON.parse(localStorage.getItem(OQ_KEY) || "[]");
+    q.push({ collection: collectionName, data, time: Date.now() });
+    localStorage.setItem(OQ_KEY, JSON.stringify(q));
+  } catch(e) { console.log("Queue failed:", e.message); }
+}
+
+async function syncOfflineQueue() {
+  try {
+    const q = JSON.parse(localStorage.getItem(OQ_KEY) || "[]");
+    if (!q.length) return;
+    const failed = [];
+    for (const item of q) {
+      try {
+        await addDoc(collection(db, item.collection), item.data);
+      } catch(e) {
+        failed.push(item); // keep failed items for next retry
+      }
+    }
+    if (failed.length) localStorage.setItem(OQ_KEY, JSON.stringify(failed));
+    else localStorage.removeItem(OQ_KEY);
+  } catch(e) { console.log("Sync error:", e.message); }
+}
+
+// Auto-sync when network returns
+window.addEventListener("online", syncOfflineQueue);
+// Retry every 30 seconds while app is open
+setInterval(() => { if (navigator.onLine) syncOfflineQueue(); }, 30000);
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const DEPTS = ["Log Yard","Sawmill","Saw Shop","Workshop","Charcoal","Kindry",
@@ -822,6 +866,13 @@ function LubesModule({user}){
     const lube=lubes.find(l=>l.id===form.lubeId);
     if(!lube) return;
     setLoading(true);
+    const txData={
+      type:"lube",action,itemId:form.lubeId,itemName:lube.name,
+      qty,unit:lube.unit,takenBy:form.takenBy||"",
+      equipment:form.equipment||"",desc:form.desc||"",
+      issuedBy:user?.name||"Unknown",date:today(),
+      createdAt:navigator.onLine?serverTimestamp():new Date().toISOString()
+    };
     try {
       const lubeRef=doc(db,"lubricants",form.lubeId);
       await runTransaction(db,async(tx)=>{
@@ -832,15 +883,23 @@ function LubesModule({user}){
           throw new Error(`Not enough stock! Only ${current} ${snap.data().unit} left.`);
         tx.update(lubeRef,{currentStock:increment(action==="restock"?qty:-qty)});
       });
-      await addDoc(collection(db,"transactions"),{
-        type:"lube",action,itemId:form.lubeId,itemName:lube.name,
-        qty,unit:lube.unit,takenBy:form.takenBy||"",
-        equipment:form.equipment||"",desc:form.desc||"",
-        issuedBy:user?.name||"Unknown",date:today(),createdAt:serverTimestamp()
-      });
+      await addDoc(collection(db,"transactions"),txData);
       showToast(action==="issue"?"✅ Issued!":"✅ Restocked!");
       setForm({lubeId:"",qty:"",takenBy:"",equipment:"",desc:""});
-    } catch(e){ showToast(e.message||"Failed","danger"); }
+    } catch(e){
+      if(!navigator.onLine){
+        // Save offline — Firestore persistence will sync the stock update
+        queueOffline("transactions",txData);
+        // Optimistic UI update on lubes list
+        setLubes(prev=>prev.map(l=>l.id===form.lubeId
+          ?{...l,currentStock:(l.currentStock||0)+(action==="restock"?qty:-qty)}
+          :l));
+        showToast(action==="issue"?"✅ Issued offline — will sync!":"✅ Restocked offline — will sync!");
+        setForm({lubeId:"",qty:"",takenBy:"",equipment:"",desc:""});
+      } else {
+        showToast(e.message||"Failed","danger");
+      }
+    }
     setLoading(false);
   };
 
@@ -1762,13 +1821,18 @@ function AdminChatList({user,onSelect}){
 }
 
 function ChatThread({dept,user,onBack}){
-  const [msgs,setMsgs]=useState([]);
+  const [msgs,setMsgs]=useState(()=>{
+    // Load cached messages instantly — no network needed
+    try {
+      const cached=localStorage.getItem(`kktr_chat_${dept}`);
+      return cached?JSON.parse(cached):[];
+    } catch(e){ return []; }
+  });
   const [input,setInput]=useState("");
   const bottomRef=useRef(null);
-  const isAdmin=user.role==="admin"; // ONLY admin sends as "admin"
+  const isAdmin=user.role==="admin";
 
   useEffect(()=>{
-    // Firestore subcollection: chats/{dept}/messages
     const q=query(
       collection(db,"chats",dept,"messages"),
       orderBy("createdAt","asc")
@@ -1776,7 +1840,8 @@ function ChatThread({dept,user,onBack}){
     const unsub=onSnapshot(q,s=>{
       const all=s.docs.map(d=>({id:d.id,...d.data()}));
       setMsgs(all);
-      // Mark unread messages as read
+      // Cache for offline use
+      try { localStorage.setItem(`kktr_chat_${dept}`,JSON.stringify(all.slice(-100))); } catch(e){}
       s.docs.forEach(d=>{
         const m=d.data();
         if(isAdmin&&m.from!=="admin"&&!m.read)
@@ -1796,18 +1861,18 @@ function ChatThread({dept,user,onBack}){
     if(!input.trim()) return;
     const text=input.trim();
     setInput("");
+    const msg={
+      text, from:isAdmin?"admin":user.dept,
+      senderName:user?.name||user?.username||"Unknown",
+      dept, read:false, createdAt:Date.now()
+    };
+    // Optimistic UI — show immediately
+    setMsgs(prev=>[...prev,{...msg,id:"_tmp_"+Date.now()}]);
     try {
-      await addDoc(collection(db,"chats",dept,"messages"),{
-        text,
-        from:isAdmin?"admin":user.dept,
-        senderName:user?.name||user?.username||"Unknown",
-        dept,
-        read:false,
-        createdAt:Date.now()
-      });
+      await addDoc(collection(db,"chats",dept,"messages"),msg);
     } catch(e){
-      setInput(text); // restore on error
-      console.error("Send failed:",e.message);
+      // Queue for when connection returns
+      queueOffline(`chats/${dept}/messages`,msg);
     }
   };
 
@@ -1938,18 +2003,30 @@ function AttendanceModule({user}){
   const saveAtt=async()=>{
     setLoading(true);
     try {
-      // v8.2: flat attendance/{dept_date_workerId} — one collection, no subcollections
       for(const w of workers){
         const docId=`${dept}_${selDate}_${w.id}`;
-        await setDoc(doc(db,"attendance",docId),{
+        const data={
           workerId:w.id,workerName:w.name,workerType:w.type||"casual",
           dept,date:selDate,present:!!att[w.id],
           markedBy:user?.name||user?.username||"Unknown",
-          status:"pending", // HR must approve
-          createdAt:serverTimestamp()
-        });
+          status:"pending",createdAt:serverTimestamp()
+        };
+        try {
+          await setDoc(doc(db,"attendance",docId),data);
+        } catch(e){
+          // Offline — queue for later sync, also cache locally
+          queueOffline("attendance",{...data,_docId:docId});
+          try {
+            const key=`kktr_att_${dept}_${selDate}`;
+            const local=JSON.parse(localStorage.getItem(key)||"{}");
+            local[w.id]={...data,createdAt:Date.now()};
+            localStorage.setItem(key,JSON.stringify(local));
+          } catch(le){}
+        }
       }
-      showToast("✅ Attendance saved — awaiting HR approval!");
+      showToast(navigator.onLine
+        ?"✅ Attendance saved — awaiting HR approval!"
+        :"✅ Saved offline — will sync when connected");
     } catch(e){ showToast("Failed: "+e.message,"danger"); }
     setLoading(false);
   };
@@ -2105,12 +2182,127 @@ function HRModule({user}){
         {id:"attendance",label:"Attend."},
         {id:"attapprove",label:"Approve"},
         {id:"reqs",      label:"Reqs"},
+        {id:"sendreport",label:"📤 Report"},
       ]} active={tab} onSelect={setTab}/>
       {tab==="roster"    &&<StaffRoster user={user}/>}
       {tab==="chop"      &&<ChopMoney user={user}/>}
       {tab==="attendance"&&<AttendanceReports user={user}/>}
       {tab==="attapprove"&&<AttendanceApproval user={user}/>}
       {tab==="reqs"      &&<ReqsModule user={user}/>}
+      {tab==="sendreport"&&<HRReportSender user={user}/>}
+    </div>
+  );
+}
+
+// ─── HR REPORT SENDER ────────────────────────────────────────────────────────
+function HRReportSender({user}){
+  const [toastEl,showToast]=useToast();
+  const [loading,setLoading]=useState(false);
+  const [reportType,setReportType]=useState("attendance");
+  const [month,setMonth]=useState(()=>new Date().toISOString().slice(0,7));
+  const COO_WHATSAPP="+233 24 954 2811"; // Admin updates in Settings
+  const COO_EMAIL="coo@kktr.com";
+
+  const buildAttendanceText=async()=>{
+    const snap=await getDocs(collection(db,"attendanceReports"));
+    const reports=snap.docs.map(d=>d.data())
+      .filter(r=>r.month===month)
+      .sort((a,b)=>(a.dept||"").localeCompare(b.dept||""));
+    if(!reports.length) return null;
+    let text=`📊 *KKTR ATTENDANCE REPORT — ${month}*\nPrepared by: ${user?.name||"HR"}\nDate: ${new Date().toLocaleDateString("en-GB")}\n\n`;
+    let gP=0,gA=0,gC=0;
+    reports.forEach(r=>{
+      text+=`🏢 *${r.dept}*\n`;
+      (r.summary||[]).forEach(w=>{
+        text+=`  ${w.name}: ${w.present}✓ ${w.absent}✗ — GH₵${w.chopMoney||0}\n`;
+        gP+=w.present||0; gA+=w.absent||0; gC+=w.chopMoney||0;
+      });
+      text+="\n";
+    });
+    text+=`*TOTALS: ${gP} Present | ${gA} Absent | GH₵${gC} Chop Money*`;
+    return text;
+  };
+
+  const buildChopText=async()=>{
+    const snap=await getDocs(collection(db,"chopMoney"));
+    const all=snap.docs.map(d=>d.data());
+    const relevant=all.filter(r=>{
+      const d=r.createdAt?.toDate?.();
+      return d&&`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`===month;
+    });
+    if(!relevant.length) return null;
+    let text=`💰 *KKTR CHOP MONEY REPORT — ${month}*\nPrepared by: ${user?.name||"HR"}\nDate: ${new Date().toLocaleDateString("en-GB")}\n\n`;
+    let total=0;
+    relevant.forEach(r=>{
+      text+=`🏢 *${r.dept}* — ${r.weekStart} to ${r.weekEnd}\n`;
+      (r.chopList||[]).forEach(w=>{ text+=`  ${w.name}: ${w.days} days — GH₵${w.amount}\n`; });
+      text+=`  Subtotal: GH₵${r.totalAmount||0}\n\n`;
+      total+=r.totalAmount||0;
+    });
+    text+=`*GRAND TOTAL: GH₵${total}*`;
+    return text;
+  };
+
+  const sendReport=async(method)=>{
+    setLoading(true);
+    try {
+      const text=reportType==="attendance"
+        ?await buildAttendanceText()
+        :await buildChopText();
+      if(!text){ showToast("No data for "+month,"warn"); setLoading(false); return; }
+
+      // Always save to Firestore so COO can see in-app
+      try {
+        await addDoc(collection(db,"hrReports"),{
+          type:reportType,month,text,
+          sentBy:user?.name||"HR",sentAt:serverTimestamp(),method
+        });
+      } catch(e){ queueOffline("hrReports",{type:reportType,month,text,sentBy:user?.name||"HR",method}); }
+
+      if(method==="whatsapp"){
+        window.open(`https://wa.me/${COO_WHATSAPP}?text=${encodeURIComponent(text)}`,"_blank");
+        showToast("✅ Opening WhatsApp…");
+      } else if(method==="email"){
+        const sub=encodeURIComponent(`KKTR ${reportType==="attendance"?"Attendance":"Chop Money"} Report — ${month}`);
+        window.open(`mailto:${COO_EMAIL}?subject=${sub}&body=${encodeURIComponent(text)}`,"_blank");
+        showToast("✅ Opening Email…");
+      } else {
+        showToast("✅ Report sent to COO in-app!");
+      }
+    } catch(e){ showToast("Failed: "+e.message,"danger"); }
+    setLoading(false);
+  };
+
+  return(
+    <div>
+      {toastEl}
+      <Card style={{border:`1.5px solid ${C.blue}`}}>
+        <div style={{fontWeight:800,color:C.blue,marginBottom:"12px",fontSize:"0.95rem"}}>
+          📤 Send Report to COO</div>
+        <div style={{display:"flex",gap:"8px",marginBottom:"10px"}}>
+          {["attendance","chop"].map(t=>(
+            <button key={t} onClick={()=>setReportType(t)}
+              style={{flex:1,padding:"9px",border:`1.5px solid ${reportType===t?C.blue:C.border}`,
+                borderRadius:"8px",background:reportType===t?C.blue:"white",
+                color:reportType===t?"white":C.forest,fontWeight:700,
+                fontSize:"0.78rem",cursor:"pointer",fontFamily:"inherit"}}>
+              {t==="attendance"?"📅 Attendance":"💰 Chop Money"}
+            </button>
+          ))}
+        </div>
+        <Inp label="Month" type="month" value={month} onChange={e=>setMonth(e.target.value)}/>
+        <div style={{display:"flex",flexDirection:"column",gap:"8px",marginTop:"8px"}}>
+          <Btn onClick={()=>sendReport("whatsapp")} loading={loading}
+            color="#25D366" style={{justifyContent:"center"}}>
+            📱 Send via WhatsApp</Btn>
+          <Btn onClick={()=>sendReport("email")} loading={loading}
+            color={C.blue} style={{justifyContent:"center"}}>
+            📧 Send via Email</Btn>
+          <Btn onClick={()=>sendReport("inapp")} loading={loading}
+            color={C.sage} style={{justifyContent:"center"}}>
+            🔔 Notify COO In-App</Btn>
+        </div>
+      </Card>
     </div>
   );
 }
@@ -3367,7 +3559,7 @@ function SettingsModule({user,onLogout,onInstall}){
         <div style={{fontWeight:800,color:C.cream,fontSize:"1rem"}}>
           Kete Krachi Timber Recovery</div>
         <div style={{fontSize:"0.75rem",color:"rgba(245,237,214,0.7)",marginTop:"4px"}}>
-          Store Management System v8.6</div>
+          Store Management System v9.0</div>
         <div style={{fontSize:"0.7rem",color:"rgba(245,237,214,0.4)"}}>
           Built by Anaase-Tech Ltd · {new Date().getFullYear()} ·</div>
       </Card>
@@ -3446,6 +3638,25 @@ function AppInner(){
 
   const login=u=>{ Sess.save(u); setUser(u); setTab("home"); };
   const logout=()=>{ Sess.clear(); setUser(null); };
+
+  // ─── ONLINE / OFFLINE STATUS ─────────────────────────────────────────────────
+  const [online,setOnline]=useState(navigator.onLine);
+  const [pendingSync,setPendingSync]=useState(0);
+  useEffect(()=>{
+    const on=()=>{ setOnline(true); syncOfflineQueue(); };
+    const off=()=>setOnline(false);
+    window.addEventListener("online",on);
+    window.addEventListener("offline",off);
+    // Update pending count every 5s
+    const t=setInterval(()=>{
+      try {
+        const q=JSON.parse(localStorage.getItem(OQ_KEY)||"[]");
+        setPendingSync(q.length);
+      } catch(e){}
+    },5000);
+    return()=>{ window.removeEventListener("online",on);
+                window.removeEventListener("offline",off); clearInterval(t); };
+  },[]);
 
   // ─── GLOBAL REAL-TIME NOTIFICATION LISTENER ───────────────────────────────
   useEffect(()=>{
@@ -3539,12 +3750,30 @@ function AppInner(){
           )}
           <div style={{display:"flex",alignItems:"center",gap:"4px"}}>
             <div style={{width:"7px",height:"7px",borderRadius:"50%",
-              background:navigator.onLine?C.ok:C.warn}}/>
+              background:online?C.ok:C.warn}}/>
             <span style={{fontSize:"0.65rem",color:"rgba(245,237,214,0.55)"}}>
-              {navigator.onLine?"Live":"Offline"}</span>
+              {online?"Live":"Offline"}</span>
           </div>
         </div>
       </div>
+
+      {/* Offline banner */}
+      {!online&&(
+        <div style={{background:"#e65100",color:"white",padding:"6px 12px",
+          textAlign:"center",fontWeight:700,fontSize:"0.75rem",
+          display:"flex",alignItems:"center",justifyContent:"center",gap:"8px"}}>
+          ⚠ Offline Mode — changes will sync when connected
+          {pendingSync>0&&<span style={{background:"rgba(255,255,255,0.2)",
+            borderRadius:"10px",padding:"1px 8px"}}>
+            🔄 {pendingSync} queued</span>}
+        </div>
+      )}
+      {online&&pendingSync>0&&(
+        <div style={{background:C.sage,color:"white",padding:"4px 12px",
+          textAlign:"center",fontWeight:700,fontSize:"0.72rem"}}>
+          🔄 Syncing {pendingSync} offline changes…
+        </div>
+      )}
 
       <div>
         {tab==="home"&&<Dashboard user={user} onNav={setTab}/>}
