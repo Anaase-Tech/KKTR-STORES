@@ -2200,7 +2200,7 @@ function HRReportSender({user}){
   const [loading,setLoading]=useState(false);
   const [reportType,setReportType]=useState("attendance");
   const [month,setMonth]=useState(()=>new Date().toISOString().slice(0,7));
-  const COO_WHATSAPP="+233 24 954 2811"; // Admin updates in Settings
+  const COO_WHATSAPP="233XXXXXXXXX"; // Admin updates in Settings
   const COO_EMAIL="coo@kktr.com";
 
   const buildAttendanceText=async()=>{
@@ -3559,9 +3559,9 @@ function SettingsModule({user,onLogout,onInstall}){
         <div style={{fontWeight:800,color:C.cream,fontSize:"1rem"}}>
           Kete Krachi Timber Recovery</div>
         <div style={{fontSize:"0.75rem",color:"rgba(245,237,214,0.7)",marginTop:"4px"}}>
-          Store Management System v9.0</div>
+          Store Management System v9.1</div>
         <div style={{fontSize:"0.7rem",color:"rgba(245,237,214,0.4)"}}>
-          Built by Anaase-Tech Ltd · {new Date().getFullYear()} ·</div>
+          Built by Anaase-Tech Ltd · {new Date().getFullYear()} · </div>
       </Card>
     </div>
   );
@@ -3609,6 +3609,16 @@ class ErrorBoundary extends Component {
 
 // ─── ROOT ─────────────────────────────────────────────────────────────────────
 export default function App(){
+  useEffect(()=>{
+    // Hide splash screen now that React has mounted
+    if(window.__hideSplash) window.__hideSplash();
+    // Register background sync
+    if("serviceWorker" in navigator && "SyncManager" in window){
+      navigator.serviceWorker.ready
+        .then(reg=>reg.sync.register("kktr-sync").catch(()=>{}))
+        .catch(()=>{});
+    }
+  },[]);
   return(
     <ErrorBoundary>
       <AppInner/>
