@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, Component } from "react";
 import { initializeApp, getApps } from "firebase/app";
 import {
-  initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
+  getFirestore, enableIndexedDbPersistence,
   doc, setDoc, getDoc, getDocs, addDoc,
   updateDoc, deleteDoc, collection, query, where, orderBy,
   onSnapshot, serverTimestamp, enableNetwork, runTransaction, increment
@@ -22,29 +22,19 @@ const firebaseConfig = {
 
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
 
-// ─── OFFLINE-FIRST FIRESTORE (v9.1) ──────────────────────────────────────────
-let db;
-try {
-  // Try full multi-tab persistence first (Chrome desktop/modern Android)
-  db = initializeFirestore(app, {
-    localCache: persistentLocalCache({
-      tabManager: persistentMultipleTabManager()
-    })
-  });
-} catch(e1) {
-  try {
-    // Fallback: single-tab persistence (older Android / Samsung browsers)
-    db = initializeFirestore(app, {
-      localCache: persistentLocalCache()
-    });
-  } catch(e2) {
-    // Final fallback: long polling (always works, no offline persistence)
-    db = initializeFirestore(app, {
-      experimentalForceLongPolling: true,
-      useFetchStreams: false
-    });
+// ─── OFFLINE-FIRST FIRESTORE (v9.2 — Firebase v9 compatible) ─────────────────
+// enableIndexedDbPersistence works in Firebase v9 modular SDK
+// Must be called immediately after getFirestore, before any reads/writes
+const db = getFirestore(app);
+enableIndexedDbPersistence(db).catch(err => {
+  if(err.code === "failed-precondition") {
+    // Multiple tabs open — persistence works in one tab only
+    console.log("[KKTR] Persistence: multiple tabs, single-tab mode");
+  } else if(err.code === "unimplemented") {
+    // Browser doesn't support IndexedDB (very rare)
+    console.log("[KKTR] Persistence: not supported on this browser");
   }
-}
+});
 const rtdb = getDatabase(app);
 const storage = getStorage(app);
 
@@ -3775,7 +3765,7 @@ function SettingsModule({user,onLogout,onInstall}){
         <div style={{fontSize:"0.75rem",color:"rgba(245,237,214,0.7)",marginTop:"4px"}}>
           Store Management System v9.2</div>
         <div style={{fontSize:"0.7rem",color:"rgba(245,237,214,0.4)"}}>
-          Built by Anaase-Tech Ltd · {new Date().getFullYear()} · Offline-First</div>
+          Built by Anaase-Tech Ltd · {new Date().getFullYear()} · Offline-First + HR Reports + Auto-Sync</div>
       </Card>
     </div>
   );
