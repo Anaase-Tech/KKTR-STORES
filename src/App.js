@@ -22,21 +22,28 @@ const firebaseConfig = {
 
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
 
-// ─── OFFLINE-FIRST FIRESTORE (v9) ─────────────────────────────────────────────
-// persistentLocalCache = data survives network loss, app restart, page refresh
+// ─── OFFLINE-FIRST FIRESTORE (v9.1) ──────────────────────────────────────────
 let db;
 try {
+  // Try full multi-tab persistence first (Chrome desktop/modern Android)
   db = initializeFirestore(app, {
     localCache: persistentLocalCache({
       tabManager: persistentMultipleTabManager()
     })
   });
-} catch(e) {
-  // Fallback for browsers that don't support IndexedDB persistence
-  db = initializeFirestore(app, {
-    experimentalForceLongPolling: true,
-    useFetchStreams: false
-  });
+} catch(e1) {
+  try {
+    // Fallback: single-tab persistence (older Android / Samsung browsers)
+    db = initializeFirestore(app, {
+      localCache: persistentLocalCache()
+    });
+  } catch(e2) {
+    // Final fallback: long polling (always works, no offline persistence)
+    db = initializeFirestore(app, {
+      experimentalForceLongPolling: true,
+      useFetchStreams: false
+    });
+  }
 }
 const rtdb = getDatabase(app);
 const storage = getStorage(app);
@@ -395,10 +402,15 @@ function LoginScreen({onLogin,onRegister,onForgot}){
           ?<img src={logo} alt="logo" style={{width:"80px",height:"80px",
               borderRadius:"50%",objectFit:"cover",margin:"0 auto 12px",
               display:"block",border:`3px solid ${C.gold}`}}/>
-          :<div style={{width:"80px",height:"80px",borderRadius:"50%",
+          :<div style={{width:"80px",height:"80px",borderRadius:"16px",
               background:C.gold,margin:"0 auto 12px",display:"flex",
-              alignItems:"center",justifyContent:"center",fontSize:"2.4rem",
-              boxShadow:"0 4px 20px rgba(0,0,0,0.4)"}}>🪵</div>}
+              alignItems:"center",justifyContent:"center",
+              boxShadow:"0 4px 20px rgba(0,0,0,0.4)",overflow:"hidden"}}>
+              <img src="/icon192.png" alt="KKTR"
+                style={{width:"100%",height:"100%",objectFit:"cover"}}
+                onError={e=>{e.target.style.display="none";
+                  e.target.parentElement.innerHTML="🪵"}}/>
+            </div>}
         <div style={{fontSize:"1.4rem",color:C.cream,fontWeight:800,lineHeight:1.2}}>
           Kete Krachi<br/>Timber Recovery</div>
         <div style={{fontSize:"0.7rem",color:"rgba(245,237,214,0.6)",marginTop:"6px",
@@ -3577,7 +3589,12 @@ class ErrorBoundary extends Component {
         <div style={{minHeight:"100vh",background:C.forest,display:"flex",
           flexDirection:"column",alignItems:"center",justifyContent:"center",
           padding:"24px",fontFamily:"system-ui"}}>
-          <div style={{fontSize:"3rem",marginBottom:"16px"}}>🪵</div>
+          <div style={{width:"70px",height:"70px",borderRadius:"16px",
+            overflow:"hidden",marginBottom:"16px"}}>
+            <img src="/icon192.png" alt="KKTR"
+              style={{width:"100%",height:"100%",objectFit:"cover"}}
+              onError={e=>{e.target.parentElement.innerHTML="🪵"}}/>
+          </div>
           <div style={{color:C.cream,fontWeight:800,fontSize:"1.1rem",marginBottom:"8px"}}>
             KKTR Stores</div>
           <div style={{color:C.gold,fontWeight:700,marginBottom:"8px"}}>
@@ -3771,7 +3788,11 @@ function AppInner(){
       <div style={{background:`linear-gradient(90deg,${C.forest},${C.bark})`,
         padding:"10px 16px",display:"flex",alignItems:"center",gap:"10px",
         position:"sticky",top:0,zIndex:100,boxShadow:"0 2px 10px rgba(0,0,0,0.2)"}}>
-        <div style={{fontSize:"1.3rem"}}>🪵</div>
+        <img src="/icon192.png" alt="KKTR"
+          style={{width:"32px",height:"32px",borderRadius:"8px",objectFit:"cover"}}
+          onError={e=>{e.target.style.display="none";
+            e.target.nextSibling&&(e.target.nextSibling.style.display="block")}}/>
+        <span style={{display:"none",fontSize:"1.3rem"}}>🪵</span>
         <div>
           <div style={{fontSize:"0.9rem",color:C.cream,fontWeight:800,lineHeight:1.1}}>
             KKTR Stores</div>
