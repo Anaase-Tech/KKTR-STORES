@@ -638,6 +638,7 @@ function Dashboard({user,onNav}){
 
   if(user.role==="dept") return <DeptDashboard user={user} onNav={onNav}/>;
   if(user.role==="hr") return <HRDashboard user={user} onNav={onNav}/>;
+  if(user.role==="coo") return <COODashboard user={user} onNav={onNav}/>;
 
   const dStr=new Date().toLocaleDateString("en-GB",
     {weekday:"long",day:"numeric",month:"long"});
@@ -651,7 +652,10 @@ function Dashboard({user,onNav}){
         <div style={{fontSize:"1.2rem",color:C.cream,fontWeight:800,marginTop:"2px"}}>
           Hello, {getFirstName(user)} 👋</div>
         <div style={{fontSize:"0.78rem",color:"rgba(245,237,214,0.65)",marginTop:"2px"}}>
-          System Administrator · Stores Manager</div>
+          {user.role==="admin"?"System Administrator · Stores Manager"
+            :user.role==="coo"?"Chief Operations Officer · Administration"
+            :user.role==="store_manager"?"Store Manager"
+            :`${user.dept||""} · ${user.role||""}`}</div>
       </div>
       {stats.pwdResets>0&&(
         <div style={{background:"#fff8e7",border:`1.5px solid ${C.gold}`,
@@ -788,6 +792,60 @@ function DeptDashboard({user,onNav}){
           <Btn sm onClick={()=>onNav("chat")} color={C.sage}
             style={{flex:1,justifyContent:"center"}}>
             💬 Chat{unread>0?` (${unread})`:""}</Btn>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+// ─── COO DASHBOARD ────────────────────────────────────────────────────────────
+function COODashboard({user,onNav}){
+  const [p,setP]=useState({reqs:0,reports:0,chop:0});
+  useEffect(()=>{
+    const uR=onSnapshot(query(collection(db,"requisitions"),
+      where("approverRole","==","coo")),
+      s=>setP(x=>({...x,reqs:s.docs.filter(d=>d.data().status==="pending").length})));
+    const uA=onSnapshot(query(collection(db,"attendanceReports"),
+      where("status","==","pending")),
+      s=>setP(x=>({...x,reports:s.size})));
+    const uC=onSnapshot(query(collection(db,"chopMoney"),
+      where("status","==","pending")),
+      s=>setP(x=>({...x,chop:s.size})));
+    return()=>{uR();uA();uC();};
+  },[]);
+  return(
+    <div style={{padding:"0 12px 80px"}}>
+      <div style={{background:`linear-gradient(135deg,${C.forest},${C.bark})`,
+        padding:"18px 16px 22px",borderRadius:"0 0 22px 22px",margin:"0 -12px 14px"}}>
+        <div style={{fontSize:"1.2rem",color:C.cream,fontWeight:800}}>
+          Hello, {getFirstName(user)} 👋</div>
+        <div style={{fontSize:"0.78rem",color:"rgba(245,237,214,0.65)",marginTop:"2px"}}>
+          Chief Operations Officer · Administration</div>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"10px",marginBottom:"12px"}}>
+        {[
+          {icon:"📋",l:"Pending Reqs",  v:p.reqs,   s:"awaiting approval", c:p.reqs>0?C.warn:C.ok,   action:()=>onNav("reqs")},
+          {icon:"📅",l:"Att. Reports",  v:p.reports, s:"pending review",   c:p.reports>0?C.warn:C.ok, action:()=>onNav("reqs")},
+          {icon:"💰",l:"Chop Money",    v:p.chop,   s:"pending",           c:p.chop>0?C.warn:C.ok,   action:()=>onNav("reqs")},
+          {icon:"💬",l:"Chat Admin",    v:"→",      s:"direct line",       c:C.blue,                  action:()=>onNav("chat")},
+        ].map((s,i)=>(
+          <Card key={i} style={{marginBottom:0,cursor:"pointer"}} onClick={s.action}>
+            <div style={{fontSize:"1.6rem",marginBottom:"2px"}}>{s.icon}</div>
+            <div style={{fontSize:"1.6rem",fontWeight:800,color:s.c,lineHeight:1}}>{s.v}</div>
+            <div style={{fontSize:"0.72rem",fontWeight:700,color:C.timber,
+              textTransform:"uppercase",marginTop:"2px"}}>{s.l}</div>
+            <div style={{fontSize:"0.65rem",color:"#aaa"}}>{s.s}</div>
+          </Card>
+        ))}
+      </div>
+      <Card style={{border:`1.5px solid ${C.blue}`}}>
+        <div style={{fontWeight:800,color:C.blue,marginBottom:"8px",fontSize:"0.88rem"}}>
+          🏢 COO — Your Authority</div>
+        <div style={{fontSize:"0.78rem",color:"#888",lineHeight:1.7}}>
+          ✅ Approve requisitions from Stores Admin<br/>
+          ✅ Review HR attendance reports<br/>
+          ✅ View chop money submissions<br/>
+          ✅ Chat with all departments
         </div>
       </Card>
     </div>
@@ -3760,6 +3818,13 @@ function AppInner(){
     {id:"chat",icon:"💬",l:"Chat"},{id:"ai",icon:"🤖",l:"AI"},
     {id:"settings",icon:"⚙",l:"More"},
   ];
+  const cooNav=[
+    {id:"home",  icon:"🏠",l:"Home"},
+    {id:"reqs",  icon:"📋",l:"Reqs"},
+    {id:"reports",icon:"📊",l:"Reports"},
+    {id:"chat",  icon:"💬",l:"Chat"},
+    {id:"settings",icon:"⚙",l:"Account"},
+  ];
   const hrNav=[
     {id:"home",icon:"🏠",l:"Home"},{id:"hr",icon:"👥",l:"HR"},
     {id:"reqs",icon:"📋",l:"Reqs"},{id:"chat",icon:"💬",l:"Chat"},
@@ -3770,7 +3835,8 @@ function AppInner(){
     {id:"attendance",icon:"📅",l:"Attend."},{id:"receipts",icon:"🧾",l:"Receipts"},
     {id:"chat",icon:"💬",l:"Chat"},{id:"settings",icon:"⚙",l:"Account"},
   ];
-  const nav=isAdmin?adminNav:isHR?hrNav:deptNav;
+  const isCOO=user.role==="coo";
+  const nav=isAdmin?adminNav:isCOO?cooNav:isHR?hrNav:deptNav;
 
   return(
     <div style={{fontFamily:"'Nunito',system-ui,sans-serif",background:C.panel,
@@ -3798,7 +3864,11 @@ function AppInner(){
             KKTR Stores</div>
           <div style={{fontSize:"0.62rem",color:"rgba(245,237,214,0.55)",
             textTransform:"uppercase",letterSpacing:"0.05em"}}>
-            {isAdmin?"System Administrator":isHR?"HR Department":user.dept}</div>
+            {isAdmin?"System Administrator"
+              :isCOO?"COO · Administration"
+              :isHR?"HR Department"
+              :user.role==="store_manager"?"Store Manager"
+              :user.dept}</div>
         </div>
         <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:"8px"}}>
           {showInstall&&(
