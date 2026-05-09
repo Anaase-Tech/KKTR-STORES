@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#1a2e1a" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/logo192.png" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="application-name" content="KKTR Stores" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="KKTR" />
+    <meta name="description" content="KKTR Stores — Enterprise Store Management" />
+    <link rel="icon" href="/logo192.png" type="image/png" />
+    <title>KKTR Stores</title>
+    <style>
+      *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+      html,body{height:100%;overflow-x:hidden}
+      body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#1a2e1a}
+      #root{min-height:100vh;background:#f5f0e8}
+      #kktr-splash{position:fixed;inset:0;background:#1a2e1a;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:99999;transition:opacity 0.5s ease}
+      #kktr-splash .logo{width:90px;height:90px;border-radius:20px;background:#2d5a27;display:flex;align-items:center;justify-content:center;font-size:2.5rem;font-weight:900;color:#F5EDD6;margin-bottom:18px;box-shadow:0 8px 32px rgba(0,0,0,0.4)}
+      #kktr-splash h1{color:#F5EDD6;font-size:1.5rem;font-weight:800;letter-spacing:0.08em}
+      #kktr-splash p{color:rgba(245,237,214,0.45);font-size:0.75rem;margin-top:4px;letter-spacing:0.05em}
+      #kktr-splash .loader{display:flex;gap:6px;margin-top:30px}
+      #kktr-splash .dot{width:7px;height:7px;border-radius:50%;background:#F5EDD6;animation:blink 1.2s ease-in-out infinite}
+      #kktr-splash .dot:nth-child(2){animation-delay:0.2s}
+      #kktr-splash .dot:nth-child(3){animation-delay:0.4s}
+      @keyframes blink{0%,100%{opacity:0.15;transform:scale(0.7)}50%{opacity:1;transform:scale(1.1)}}
+    </style>
+  </head>
+  <body>
+    <div id="kktr-splash">
+      <div class="logo">K</div>
+      <h1>KKTR STORES</h1>
+      <p>KETE KRACHI TIMBER RECOVERY</p>
+      <div class="loader">
+        <div class="dot"></div><div class="dot"></div><div class="dot"></div>
+      </div>
+    </div>
+    <div id="root"></div>
+    <script>
+      window.__hideSplash=function(){var el=document.getElementById("kktr-splash");if(!el)return;el.style.opacity="0";el.style.pointerEvents="none";setTimeout(function(){el&&el.remove();},500)};
+      window.__pwaPrompt=null;
+      window.addEventListener("beforeinstallprompt",function(e){e.preventDefault();window.__pwaPrompt=e;window.dispatchEvent(new CustomEvent("pwaInstallReady"))});
+    </script>
+    <script>
+      if("serviceWorker" in navigator){window.addEventListener("load",function(){navigator.serviceWorker.register("/sw.js",{scope:"/"}).then(function(reg){console.log("[KKTR] SW:",reg.scope);navigator.serviceWorker.addEventListener("message",function(e){if(e.data&&e.data.type==="SYNC_NOW")window.dispatchEvent(new Event("online"))})}).catch(function(e){console.warn("[KKTR] SW failed:",e)})})}
+    </script>
+  </body>
+</html>
