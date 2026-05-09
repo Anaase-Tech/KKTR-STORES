@@ -1,0 +1,43 @@
+{
+  "name": "KKTR Stores Enterprise",
+  "short_name": "KKTR",
+  "description": "Kete Krachi Timber Recovery — Store Management System",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ffffff",
+  "theme_color": "#1a2e1a",
+  "lang": "en",
+  "categories": ["business", "productivity"],
+  "icons": [
+    {
+      "src": "logo192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "logo512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Requisitions",
+      "short_name": "Reqs",
+      "description": "View pending requisitions",
+      "url": "/?tab=reqs",
+      "icons": [{ "src": "logo192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Chat",
+      "short_name": "Chat",
+      "description": "Open department chat",
+      "url": "/?tab=chat",
+      "icons": [{ "src": "logo192.png", "sizes": "192x192" }]
+    }
+  ]
+}
