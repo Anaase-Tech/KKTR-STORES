@@ -3561,7 +3561,7 @@ function SettingsModule({user,onLogout,onInstall}){
         <div style={{fontSize:"0.75rem",color:"rgba(245,237,214,0.7)",marginTop:"4px"}}>
           Store Management System v9.1</div>
         <div style={{fontSize:"0.7rem",color:"rgba(245,237,214,0.4)"}}>
-          Built by Anaase-Tech Ltd · {new Date().getFullYear()} · </div>
+          Built by Anaase-Tech Ltd · {new Date().getFullYear()} · Offline-First </div>
       </Card>
     </div>
   );
@@ -3609,18 +3609,47 @@ class ErrorBoundary extends Component {
 
 // ─── ROOT ─────────────────────────────────────────────────────────────────────
 export default function App(){
+  const [pwaReady,setPwaReady]=useState(false);
   useEffect(()=>{
-    // Hide splash screen now that React has mounted
     if(window.__hideSplash) window.__hideSplash();
+    // Listen for PWA install prompt
+    const h=()=>setPwaReady(true);
+    window.addEventListener("pwaInstallReady",h);
+    if(window.__pwaPrompt) setPwaReady(true);
     // Register background sync
-    if("serviceWorker" in navigator && "SyncManager" in window){
+    if("serviceWorker" in navigator&&"SyncManager" in window){
       navigator.serviceWorker.ready
         .then(reg=>reg.sync.register("kktr-sync").catch(()=>{}))
         .catch(()=>{});
     }
+    return()=>window.removeEventListener("pwaInstallReady",h);
   },[]);
+
+  const installApp=async()=>{
+    if(!window.__pwaPrompt) return;
+    window.__pwaPrompt.prompt();
+    const result=await window.__pwaPrompt.userChoice;
+    if(result.outcome==="accepted") setPwaReady(false);
+  };
+
   return(
     <ErrorBoundary>
+      {pwaReady&&(
+        <div style={{position:"fixed",bottom:"70px",left:"50%",
+          transform:"translateX(-50%)",zIndex:8888,
+          background:"#1a2e1a",color:"#F5EDD6",
+          padding:"10px 20px",borderRadius:"30px",
+          display:"flex",alignItems:"center",gap:"10px",
+          boxShadow:"0 4px 20px rgba(0,0,0,0.4)",
+          fontSize:"0.82rem",fontWeight:700,
+          cursor:"pointer",whiteSpace:"nowrap"}}
+          onClick={installApp}>
+          📲 Install KKTR App
+          <span style={{background:"#F5EDD6",color:"#1a2e1a",
+            borderRadius:"20px",padding:"2px 10px",fontSize:"0.72rem"}}>
+            FREE</span>
+        </div>
+      )}
       <AppInner/>
     </ErrorBoundary>
   );
