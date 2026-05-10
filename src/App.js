@@ -1808,7 +1808,7 @@ function ReceiptForm({onSave,loading}){
 const STAFF_ROLES=["admin","hr","coo"]; // roles that can initiate threads
 
 // Thread key helper
-const threadKey=(dept,role)=>`${dept}_${role}`;
+const threadKey=(a,b)=>[String(a||"").trim(),String(b||"").trim()].sort().join("__");
 
 // Role display names
 const roleLabel={admin:"Stores Admin",hr:"HR",coo:"COO"};
@@ -1845,7 +1845,7 @@ function StaffChatList({user,onSelect}){
     const unsubs=DEPTS.map(dept=>{
       const tid=threadKey(dept,role);
       return onSnapshot(
-        query(collection(db,"chats",tid,"messages"),orderBy("createdAt","desc")),
+        query(collection(db,"chats",tid,"messages"),orderBy("createdAt","asc")),
         s=>{
           const msgs=s.docs.map(d=>({id:d.id,...d.data()}));
           setThreads(prev=>({...prev,[dept]:msgs}));
@@ -3795,9 +3795,39 @@ function SettingsModule({user,onLogout,onInstall}){
           } catch(e2){}
         }
       }
+      // Clear stale chat caches
+      localStorage.removeItem("kktr_unread");
+      localStorage.removeItem("kktr_chat_cache");
+      localStorage.removeItem("kktr_threads");
+      localStorage.removeItem("kktr_offline_chat_queue");
+      localStorage.removeItem("kktr_stock_queue");
+      if(window.indexedDB){ indexedDB.deleteDatabase("kktr-offline-db"); }
       showToast("✅ Factory reset complete.");
       setFactoryPwd("");
     } catch(e){ showToast("Failed: "+e.message,"danger"); }
+    setLoading(false);
+  };
+
+  const clearChats = async () => {
+    if(!window.confirm("Delete all chat messages from all departments?")) return;
+    setLoading(true);
+    try {
+      for (const dept of DEPTS) {
+        for (const role of STAFF_ROLES) {
+          try {
+            const msgs = await getDocs(
+              collection(db, "chats", threadKey(dept, role), "messages")
+            );
+            for (const d of msgs.docs) {
+              await deleteDoc(d.ref);
+            }
+          } catch(e2){}
+        }
+      }
+      showToast("✅ All chats cleared!");
+    } catch(e){
+      showToast("Failed: " + e.message, "danger");
+    }
     setLoading(false);
   };
 
@@ -4061,20 +4091,6 @@ function SettingsModule({user,onLogout,onInstall}){
             <div style={{fontSize:"0.82rem",color:"#888",marginBottom:"12px"}}>
               Deletes all messages from all department chats. Fixes stale unread counts.
               Cannot be undone.</div>
-              const clearChats=async()=>{
-              if(!window.confirm("Delete all chat messages from all departments?")) return;
-              setLoading(true);
-              try {
-                for(const dept of DEPTS){
-                  for(const role of STAFF_ROLES){
-                    const msgs=await getDocs(collection(db,"chats",threadKey(dept,role),"messages"));
-                    for(const d of msgs.docs) await deleteDoc(d.ref);
-                  }
-                }
-                showToast("✅ All chats cleared!");
-              } catch(e){ showToast("Failed: "+e.message,"danger"); }
-              setLoading(false);
-            };
             <Btn onClick={clearChats} loading={loading} color={C.warn}
               style={{width:"100%",justifyContent:"center"}}>
               🗑 Clear All Chats</Btn>
@@ -4098,7 +4114,7 @@ function SettingsModule({user,onLogout,onInstall}){
         <div style={{fontWeight:800,color:C.cream,fontSize:"1rem"}}>
           Kete Krachi Timber Recovery</div>
         <div style={{fontSize:"0.75rem",color:"rgba(245,237,214,0.7)",marginTop:"4px"}}>
-          Store Management System v9.4</div>
+          Store Management System v9.5</div>
         <div style={{fontSize:"0.7rem",color:"rgba(245,237,214,0.4)"}}>
           Built by Anaase-Tech Ltd · {new Date().getFullYear()} · Offline-First + HR Reports + Auto-Sync</div>
       </Card>
