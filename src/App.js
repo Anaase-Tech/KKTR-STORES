@@ -3437,86 +3437,6 @@ function COOAllReport({user,sigName,letterhead,shareReport}){
 }
 
 
-  const [reports,setReports]=useState([]);
-  const [loading,setLoading]=useState(true);
-  useEffect(()=>{
-    getDocs(collection(db,"attendanceReports"))
-      .then(s=>{
-        const all=s.docs.map(d=>({id:d.id,...d.data()}));
-        all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
-        setReports(all); setLoading(false);
-      }).catch(()=>setLoading(false));
-  },[]);
-
-  const byDept=DEPTS.reduce((a,d)=>{a[d]=reports.filter(r=>r.dept===d);return a},{});
-
-  const buildText=()=>{
-    let t=letterhead("COO ATTENDANCE REPORT");
-    let gP=0,gA=0,gC=0;
-    DEPTS.forEach(dept=>{
-      const dr=byDept[dept]||[];
-      if(!dr.length) return;
-      t+=`\n🏢 ${dept}\n`;
-      dr.forEach(r=>{
-        t+=`  Month: ${r.month} (${r.status||"pending"})\n`;
-        (r.summary||[]).forEach(w=>{
-          t+=`    ${w.name}: ${w.present}✓ ${w.absent}✗ GH₵${w.chopMoney||0}\n`;
-          gP+=w.present||0; gA+=w.absent||0; gC+=w.chopMoney||0;
-        });
-      });
-    });
-    t+=`\n${"─".repeat(40)}\nTOTALS: ${gP} Present | ${gA} Absent | GH₵${gC}\n`;
-    return t;
-  };
-
-  if(loading) return <div style={{textAlign:"center",color:"#aaa",padding:"40px"}}>Loading…</div>;
-  const sh=shareReport(buildText(),"COO Attendance Report");
-  return(
-    <div>
-      {DEPTS.map(dept=>{
-        const dr=byDept[dept]||[];
-        if(!dr.length) return null;
-        return(
-          <div key={dept}>
-            <div style={{fontWeight:700,color:C.forest,fontSize:"0.82rem",
-              textTransform:"uppercase",letterSpacing:"0.06em",
-              margin:"14px 0 6px",display:"flex",
-              justifyContent:"space-between",alignItems:"center"}}>
-              <span>🏢 {dept}</span>
-              <span style={{color:"#aaa",fontSize:"0.68rem",fontWeight:400}}>
-                {dr.length} report{dr.length!==1?"s":""}</span>
-            </div>
-            {dr.map((r,i)=>(
-              <Card key={i} style={{marginBottom:"8px",
-                borderLeft:`4px solid ${r.status==="pending"?C.warn:C.ok}`}}>
-                <div style={{display:"flex",justifyContent:"space-between",
-                  alignItems:"center",marginBottom:"6px"}}>
-                  <div style={{fontWeight:800,color:C.forest}}>{r.month}</div>
-                  <Badge color={r.status==="pending"?C.warn:C.ok}>
-                    {(r.status||"pending").toUpperCase()}</Badge>
-                </div>
-                {(r.summary||[]).map((w,j)=>(
-                  <div key={j} style={{display:"flex",justifyContent:"space-between",
-                    padding:"4px 0",borderTop:`1px dashed ${C.border}`,
-                    fontSize:"0.78rem"}}>
-                    <span style={{color:C.forest,fontWeight:600}}>{w.name}</span>
-                    <span style={{color:C.ok}}>{w.present}✓</span>
-                    <span style={{color:C.danger}}>{w.absent}✗</span>
-                    <span style={{color:C.gold,fontWeight:700}}>GH₵{w.chopMoney||0}</span>
-                  </div>
-                ))}
-              </Card>
-            ))}
-          </div>
-        );
-      })}
-      {!reports.length&&<div style={{textAlign:"center",color:"#aaa",padding:"30px"}}>No attendance reports yet.</div>}
-      <ShareCard sh={sh} title="Attendance Report" sigName={sigName}/>
-    </div>
-  );
-}
-
-// ── COO: Chop Money Report ────────────────────────────────────────────────────
 // ── COO: HR Reports (attendance summaries + chop money sent by HR) ────────────
 function COOHRReport({user,sigName,letterhead,shareReport}){
   const [hrReports,setHrReports]=useState([]);
@@ -4330,7 +4250,7 @@ function SettingsModule({user,onLogout,onInstall}){
         <div style={{fontSize:"0.75rem",color:"rgba(245,237,214,0.7)",marginTop:"4px"}}>
           Store Management System v9.5</div>
         <div style={{fontSize:"0.7rem",color:"rgba(245,237,214,0.4)"}}>
-          Built by Anaase-Tech Ltd · {new Date().getFullYear()} · Offline-First + HR Reports + Auto-Sync</div>
+          Built by Anaase-Tech Ltd · {new Date().getFullYear()} · Offline-First </div>
       </Card>
     </div>
   );
