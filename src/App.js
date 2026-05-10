@@ -4263,7 +4263,7 @@ function SettingsModule({user,onLogout,onInstall}){
         <div style={{fontSize:"0.75rem",color:"rgba(245,237,214,0.7)",marginTop:"4px"}}>
           Store Management System v9.6</div>
         <div style={{fontSize:"0.7rem",color:"rgba(245,237,214,0.4)"}}>
-          Built by Anaase-Tech Ltd · {new Date().getFullYear()} · Offline-First </div>
+          Built by Anaase-Tech Ltd · {new Date().getFullYear()} · Offline-First + HR Reports + Auto-Sync</div>
       </Card>
     </div>
   );
