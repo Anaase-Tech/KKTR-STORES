@@ -3515,58 +3515,6 @@ function COOAllReport({user,sigName,letterhead,shareReport}){
 }
 
 
-
-  const pending=reqs.filter(r=>r.status==="pending");
-  const approved=reqs.filter(r=>r.status==="approved");
-  const rejected=reqs.filter(r=>r.status==="rejected");
-
-  const buildText=()=>{
-    let t=letterhead("COO REQUISITIONS REPORT");
-    t+=`\nTotal: ${reqs.length} | Pending: ${pending.length} | Approved: ${approved.length} | Rejected: ${rejected.length}\n`;
-    t+=`\n${"─".repeat(40)}\nPENDING APPROVAL\n${"─".repeat(40)}\n`;
-    if(!pending.length) t+="None pending.\n";
-    else pending.forEach(r=>t+=`• ${r.item} — ${r.dept} (${r.requestedBy}) qty:${r.qty}\n`);
-    t+=`\n${"─".repeat(40)}\nAPPROVED\n${"─".repeat(40)}\n`;
-    if(!approved.length) t+="None approved.\n";
-    else approved.forEach(r=>t+=`✓ ${r.item} — ${r.dept} by ${r.approvedBy||"COO"}\n`);
-    return t;
-  };
-
-  if(loading) return <div style={{textAlign:"center",color:"#aaa",padding:"40px"}}>Loading…</div>;
-  const sh=shareReport(buildText(),"COO Requisitions Report");
-  return(
-    <div>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"8px",margin:"12px 0"}}>
-        {[{l:"Pending",v:pending.length,c:C.warn},
-          {l:"Approved",v:approved.length,c:C.ok},
-          {l:"Rejected",v:rejected.length,c:C.danger}].map((s,i)=>(
-          <Card key={i} style={{marginBottom:0,textAlign:"center",
-            borderTop:`3px solid ${s.c}`}}>
-            <div style={{fontSize:"1.6rem",fontWeight:800,color:s.c}}>{s.v}</div>
-            <div style={{fontSize:"0.68rem",color:"#888",textTransform:"uppercase"}}>{s.l}</div>
-          </Card>
-        ))}
-      </div>
-      {reqs.map(r=>(
-        <Card key={r.id} style={{marginBottom:"8px",
-          borderLeft:`4px solid ${r.status==="pending"?C.warn:r.status==="approved"?C.ok:C.danger}`}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-            <div>
-              <div style={{fontWeight:800,color:C.forest}}>{r.item}</div>
-              <div style={{fontSize:"0.72rem",color:"#888"}}>{r.dept} · {r.requestedBy}</div>
-              <div style={{fontSize:"0.72rem",color:C.timber}}>Qty: {r.qty} {r.unit||""}</div>
-            </div>
-            <Badge color={r.status==="pending"?C.warn:r.status==="approved"?C.ok:C.danger}>
-              {(r.status||"pending").toUpperCase()}</Badge>
-          </div>
-        </Card>
-      ))}
-      {!reqs.length&&<div style={{textAlign:"center",color:"#aaa",padding:"30px"}}>No requisitions found.</div>}
-      <ShareCard sh={sh} title="Requisitions Report" sigName={sigName}/>
-    </div>
-  );
-}
-
 // ── Shared Share Card component ───────────────────────────────────────────────
 function ShareCard({sh,title,sigName}){
   return(
