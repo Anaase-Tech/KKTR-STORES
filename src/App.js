@@ -2784,22 +2784,14 @@ function ReportsModule({user}){
   const [cf,setCf]=useState(today()); const [ct,setCt]=useState(today());
   const [data,setData]=useState({lubes:[],storeItems:[],lubeTx:[],
     storeTx:[],reqs:[],receipts:[]});
-  const [hrReports,setHrReports]=useState([]);
-  const [attReports,setAttReports]=useState([]);
-  const [chopData,setChopData]=useState([]);
   const [loading,setLoading]=useState(true);
-  const isCOO=user.role==="coo";
 
   // Signature based on logged-in user
   const sigName=user?.name||user?.username||"Unknown";
   const sigTitle=user.role==="admin"?"Stores Manager"
-    :user.role==="coo"?"Chief Operations Officer"
-    :user.role==="hr"?"HR Manager"
-    :"Staff";
+    :user.role==="hr"?"HR Manager":"Staff";
   const sigDept=user.role==="admin"?"Stores Department"
-    :user.role==="coo"?"Administration"
-    :user.role==="hr"?"HR Department"
-    :user.dept||"";
+    :user.role==="hr"?"HR Department":user.dept||"";
 
   const getRange=()=>{
     const now=new Date();
@@ -2813,22 +2805,14 @@ function ReportsModule({user}){
 
   useEffect(()=>{
     setLoading(true);
-    const fetches=[
+    Promise.all([
       getDocs(collection(db,"lubricants")),
       getDocs(collection(db,"storeItems")),
       getDocs(query(collection(db,"transactions"),where("type","==","lube"))),
       getDocs(query(collection(db,"transactions"),where("type","==","store"))),
       getDocs(collection(db,"requisitions")),
       getDocs(collection(db,"receipts")),
-    ];
-    // COO also loads HR reports, attendance reports and chop money
-    if(isCOO){
-      fetches.push(getDocs(collection(db,"hrReports")));
-      fetches.push(getDocs(collection(db,"attendanceReports")));
-      fetches.push(getDocs(collection(db,"chopMoney")));
-    }
-    Promise.all(fetches).then(results=>{
-      const [l,i,lt,st,r,rc,...extra]=results;
+    ]).then(([l,i,lt,st,r,rc])=>{
       setData({
         lubes:l.docs.map(d=>({id:d.id,...d.data()})),
         storeItems:i.docs.map(d=>({id:d.id,...d.data()})),
@@ -2837,14 +2821,9 @@ function ReportsModule({user}){
         reqs:r.docs.map(d=>({id:d.id,...d.data()})),
         receipts:rc.docs.map(d=>({id:d.id,...d.data()})),
       });
-      if(isCOO&&extra.length>=3){
-        setHrReports(extra[0].docs.map(d=>({id:d.id,...d.data()})));
-        setAttReports(extra[1].docs.map(d=>({id:d.id,...d.data()})));
-        setChopData(extra[2].docs.map(d=>({id:d.id,...d.data()})));
-      }
       setLoading(false);
     }).catch(()=>setLoading(false));
-  },[period,cf,ct,isCOO]);
+  },[period,cf,ct]);
 
   const {from,to}=getRange();
   const inR=t=>{const d=tsToStr(t.createdAt);return d>=from&&d<=to;};
@@ -2889,39 +2868,6 @@ function ReportsModule({user}){
     Object.entries(deptMap).sort((a,b)=>b[1]-a[1]).forEach(([d,c])=>t+=`  ${d}: ${c} transactions\n`);
     t+=`\nREQUISITIONS: ${reqs.length} | Approved: ${reqs.filter(r=>r.status==="approved").length}\n`;
     t+=`RECEIPTS: ${receipts.length} | Total: GH₵${totalAmt.toFixed(2)}\n`;
-    t+=`\n${"═".repeat(42)}\nSigned: ${sigName}\n${sigTitle}\n${sigDept}\nKete Krachi Timber Recovery\n${"═".repeat(42)}\n`;
-    return t;
-  };
-
-  const buildCOOReport=()=>{
-    let t=letterhead(`COO CONSOLIDATED REPORT\n${new Date().toLocaleDateString("en-GB",{day:"2-digit",month:"long",year:"numeric"})}`);
-    // Stores summary
-    t+=`\n${"─".repeat(42)}\nSTORES SUMMARY\n${"─".repeat(42)}\n`;
-    t+=`Lubricants Issued: ${lubeIssued.reduce((s,x)=>s+(x.qty||0),0)} L\n`;
-    t+=`Store Items Issued: ${storeIssued.length}\n`;
-    t+=`Low Stock Items: ${lowLubes.length+lowStore.length}\n`;
-    t+=`Requisitions: ${reqs.length} total | ${reqs.filter(r=>r.status==="pending").length} pending\n`;
-    // HR attendance
-    t+=`\n${"─".repeat(42)}\nHR ATTENDANCE REPORTS\n${"─".repeat(42)}\n`;
-    if(!attReports.length){ t+=`No attendance reports on record.\n`; }
-    else attReports.forEach(r=>{
-      t+=`• ${r.dept} — ${r.month} (${r.status||"pending"})\n`;
-      const totP=(r.summary||[]).reduce((s,w)=>s+(w.present||0),0);
-      const totC=(r.summary||[]).reduce((s,w)=>s+(w.chopMoney||0),0);
-      t+=`  Workers: ${(r.summary||[]).length} | Present days: ${totP} | Chop: GH₵${totC}\n`;
-    });
-    // Chop money
-    t+=`\n${"─".repeat(42)}\nCHOP MONEY\n${"─".repeat(42)}\n`;
-    if(!chopData.length){ t+=`No chop money records.\n`; }
-    else {
-      const total=chopData.reduce((s,c)=>s+(c.totalAmount||0),0);
-      chopData.forEach(c=>t+=`• ${c.dept} — ${c.weekStart}: GH₵${c.totalAmount||0} (${c.status||"pending"})\n`);
-      t+=`Total: GH₵${total}\n`;
-    }
-    // HR sent reports
-    t+=`\n${"─".repeat(42)}\nHR REPORTS RECEIVED\n${"─".repeat(42)}\n`;
-    if(!hrReports.length){ t+=`No HR reports received.\n`; }
-    else hrReports.forEach(r=>t+=`• ${r.type} — ${r.month} (sent by ${r.sentBy})\n`);
     t+=`\n${"═".repeat(42)}\nSigned: ${sigName}\n${sigTitle}\n${sigDept}\nKete Krachi Timber Recovery\n${"═".repeat(42)}\n`;
     return t;
   };
@@ -3016,64 +2962,6 @@ function ReportsModule({user}){
         </Card>
       )}
 
-      {/* COO extra: HR reports + attendance + chop */}
-      {isCOO&&(
-        <>
-          {attReports.length>0&&(
-            <Card style={{border:`1.5px solid ${C.blue}`,marginBottom:"10px"}}>
-              <div style={{fontWeight:800,color:C.blue,marginBottom:"8px"}}>
-                📅 HR Attendance Reports</div>
-              {attReports.map((r,i)=>(
-                <div key={i} style={{padding:"6px 0",borderBottom:`1px dashed ${C.border}`,
-                  fontSize:"0.82rem"}}>
-                  <div style={{fontWeight:700,color:C.forest}}>{r.dept} — {r.month}</div>
-                  <div style={{color:"#888",fontSize:"0.72rem"}}>
-                    {(r.summary||[]).length} workers ·
-                    GH₵{(r.summary||[]).reduce((s,w)=>s+(w.chopMoney||0),0)} chop ·
-                    <span style={{color:r.status==="pending"?C.warn:C.ok,fontWeight:700}}>
-                      {" "}{r.status||"pending"}</span>
-                  </div>
-                </div>
-              ))}
-            </Card>
-          )}
-          {chopData.length>0&&(
-            <Card style={{border:`1.5px solid ${C.gold}`,marginBottom:"10px"}}>
-              <div style={{fontWeight:800,color:C.gold,marginBottom:"8px"}}>
-                💰 Chop Money Summary</div>
-              {chopData.map((c,i)=>(
-                <div key={i} style={{padding:"6px 0",borderBottom:`1px dashed ${C.border}`,
-                  fontSize:"0.82rem"}}>
-                  <div style={{fontWeight:700,color:C.forest}}>{c.dept}</div>
-                  <div style={{color:"#888",fontSize:"0.72rem"}}>
-                    {c.weekStart} · GH₵{c.totalAmount||0} ·
-                    <span style={{color:c.status==="paid"?C.ok:C.warn,fontWeight:700}}>
-                      {" "}{c.status||"pending"}</span>
-                  </div>
-                </div>
-              ))}
-              <div style={{fontWeight:800,color:C.gold,marginTop:"8px",fontSize:"0.9rem"}}>
-                Total: GH₵{chopData.reduce((s,c)=>s+(c.totalAmount||0),0)}
-              </div>
-            </Card>
-          )}
-          {hrReports.length>0&&(
-            <Card style={{border:`1.5px solid ${C.sage}`,marginBottom:"10px"}}>
-              <div style={{fontWeight:800,color:C.sage,marginBottom:"8px"}}>
-                📨 HR Reports Received</div>
-              {hrReports.map((r,i)=>(
-                <div key={i} style={{padding:"5px 0",borderBottom:`1px dashed ${C.border}`,
-                  fontSize:"0.8rem"}}>
-                  <span style={{fontWeight:700,color:C.forest,textTransform:"capitalize"}}>
-                    {r.type}</span>
-                  <span style={{color:"#888"}}> — {r.month} · by {r.sentBy}</span>
-                </div>
-              ))}
-            </Card>
-          )}
-        </>
-      )}
-
       {/* Share/export — letterhead with icon */}
       <Card>
         <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"10px"}}>
@@ -3086,30 +2974,386 @@ function ReportsModule({user}){
               Signed: {sigName} · {sigTitle}</div>
           </div>
         </div>
-        <div style={{display:"flex",gap:"8px",flexWrap:"wrap",marginBottom:"10px"}}>
-          <Btn onClick={()=>share("whatsapp",isCOO?buildCOOReport:buildStoresReport)}
+        <div style={{display:"flex",gap:"8px",flexWrap:"wrap"}}>
+          <Btn onClick={()=>share("whatsapp",buildStoresReport)}
             color="#25D366" style={{flex:1,justifyContent:"center"}}>📱 WhatsApp</Btn>
-          <Btn onClick={()=>share("email",isCOO?buildCOOReport:buildStoresReport)}
+          <Btn onClick={()=>share("email",buildStoresReport)}
             color={C.timber} style={{flex:1,justifyContent:"center"}}>✉ Email</Btn>
-          <Btn onClick={()=>share("copy",isCOO?buildCOOReport:buildStoresReport)}
+          <Btn onClick={()=>share("copy",buildStoresReport)}
             color={C.sage} style={{flex:1,justifyContent:"center"}}>📋 Copy</Btn>
         </div>
-        {isCOO&&(
-          <div style={{display:"flex",gap:"8px",flexWrap:"wrap"}}>
-            <Btn onClick={()=>share("whatsapp",buildStoresReport)}
-              color={C.timber} style={{flex:1,justifyContent:"center",fontSize:"0.75rem"}}>
-              📱 Stores Only</Btn>
-            <Btn onClick={()=>share("email",buildStoresReport)}
-              color={C.timber} style={{flex:1,justifyContent:"center",fontSize:"0.75rem"}}>
-              ✉ Stores Only</Btn>
-          </div>
-        )}
       </Card>
     </div>
   );
 }
 
 // ─── AI ───────────────────────────────────────────────────────────────────────
+// ─── COO REPORTS MODULE ───────────────────────────────────────────────────────
+// COO sees reports SENT TO THEM — not stock analytics
+// 4 tabs: Requisitions | Attendance | Chop Money | HR Reports
+// Each tab has its own report with share button
+
+function COOReportsModule({user}){
+  const [tab,setTab]=useState("reqs");
+  const sigName=user?.name||user?.username||"COO";
+  const sigTitle="Chief Operations Officer";
+
+  const letterhead=(title)=>{
+    const l="═".repeat(40);
+    return `${l}\n     KETE KRACHI TIMBER RECOVERY\n          KKTR STORES SYSTEM\n${l}\n${title}\nGenerated: ${new Date().toLocaleString("en-GB")}\n${l}\n`;
+  };
+
+  const shareReport=(text,subject)=>{
+    const full=text+`\n${"═".repeat(40)}\nSigned: ${sigName}\n${sigTitle}\nKete Krachi Timber Recovery\n${"═".repeat(40)}`;
+    const encoded=encodeURIComponent(full);
+    return{
+      whatsapp:()=>window.open(`https://wa.me/?text=${encoded}`,"_blank"),
+      email:()=>window.open(`mailto:?subject=${encodeURIComponent(subject)}&body=${encoded}`,"_blank"),
+      copy:()=>navigator.clipboard?.writeText(full).then(()=>alert("Report copied!"))
+    };
+  };
+
+  return(
+    <div style={{padding:"0 12px 80px"}}>
+      <div style={{display:"flex",alignItems:"center",gap:"10px",
+        paddingTop:"4px",marginBottom:"12px"}}>
+        <img src="/icon192.png" alt="KKTR" style={{width:"32px",height:"32px",
+          borderRadius:"8px",objectFit:"cover"}}
+          onError={e=>e.target.style.display="none"}/>
+        <div style={{fontWeight:800,fontSize:"1.1rem",color:C.forest}}>
+          COO Reports</div>
+      </div>
+      <TabBar tabs={[
+        {id:"reqs",   label:"📋 Reqs"},
+        {id:"attend", label:"📅 Attend."},
+        {id:"chop",   label:"💰 Chop"},
+        {id:"hrreports",label:"📨 HR"},
+      ]} active={tab} onSelect={setTab}/>
+
+      {tab==="reqs"    &&<COOReqsReport    user={user} sigName={sigName} letterhead={letterhead} shareReport={shareReport}/>}
+      {tab==="attend"  &&<COOAttendReport  user={user} sigName={sigName} letterhead={letterhead} shareReport={shareReport}/>}
+      {tab==="chop"    &&<COOChopReport    user={user} sigName={sigName} letterhead={letterhead} shareReport={shareReport}/>}
+      {tab==="hrreports"&&<COOHRReport     user={user} sigName={sigName} letterhead={letterhead} shareReport={shareReport}/>}
+    </div>
+  );
+}
+
+// ── COO: Requisitions Report ──────────────────────────────────────────────────
+function COOReqsReport({user,sigName,letterhead,shareReport}){
+  const [reqs,setReqs]=useState([]);
+  const [loading,setLoading]=useState(true);
+  useEffect(()=>{
+    getDocs(query(collection(db,"requisitions"),where("approverRole","==","coo")))
+      .then(s=>{
+        const all=s.docs.map(d=>({id:d.id,...d.data()}));
+        all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+        setReqs(all); setLoading(false);
+      }).catch(()=>setLoading(false));
+  },[]);
+
+  const pending=reqs.filter(r=>r.status==="pending");
+  const approved=reqs.filter(r=>r.status==="approved");
+  const rejected=reqs.filter(r=>r.status==="rejected");
+
+  const buildText=()=>{
+    let t=letterhead("COO REQUISITIONS REPORT");
+    t+=`\nTotal: ${reqs.length} | Pending: ${pending.length} | Approved: ${approved.length} | Rejected: ${rejected.length}\n`;
+    t+=`\n${"─".repeat(40)}\nPENDING APPROVAL\n${"─".repeat(40)}\n`;
+    if(!pending.length) t+="None pending.\n";
+    else pending.forEach(r=>t+=`• ${r.item} — ${r.dept} (${r.requestedBy}) qty:${r.qty}\n`);
+    t+=`\n${"─".repeat(40)}\nAPPROVED\n${"─".repeat(40)}\n`;
+    if(!approved.length) t+="None approved.\n";
+    else approved.forEach(r=>t+=`✓ ${r.item} — ${r.dept} by ${r.approvedBy||"COO"}\n`);
+    return t;
+  };
+
+  if(loading) return <div style={{textAlign:"center",color:"#aaa",padding:"40px"}}>Loading…</div>;
+  const sh=shareReport(buildText(),"COO Requisitions Report");
+  return(
+    <div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"8px",margin:"12px 0"}}>
+        {[{l:"Pending",v:pending.length,c:C.warn},
+          {l:"Approved",v:approved.length,c:C.ok},
+          {l:"Rejected",v:rejected.length,c:C.danger}].map((s,i)=>(
+          <Card key={i} style={{marginBottom:0,textAlign:"center",
+            borderTop:`3px solid ${s.c}`}}>
+            <div style={{fontSize:"1.6rem",fontWeight:800,color:s.c}}>{s.v}</div>
+            <div style={{fontSize:"0.68rem",color:"#888",textTransform:"uppercase"}}>{s.l}</div>
+          </Card>
+        ))}
+      </div>
+      {reqs.map(r=>(
+        <Card key={r.id} style={{marginBottom:"8px",
+          borderLeft:`4px solid ${r.status==="pending"?C.warn:r.status==="approved"?C.ok:C.danger}`}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+            <div>
+              <div style={{fontWeight:800,color:C.forest}}>{r.item}</div>
+              <div style={{fontSize:"0.72rem",color:"#888"}}>{r.dept} · {r.requestedBy}</div>
+              <div style={{fontSize:"0.72rem",color:C.timber}}>Qty: {r.qty} {r.unit||""}</div>
+            </div>
+            <Badge color={r.status==="pending"?C.warn:r.status==="approved"?C.ok:C.danger}>
+              {(r.status||"pending").toUpperCase()}</Badge>
+          </div>
+        </Card>
+      ))}
+      {!reqs.length&&<div style={{textAlign:"center",color:"#aaa",padding:"30px"}}>No requisitions found.</div>}
+      <ShareCard sh={sh} title="Requisitions Report" sigName={sigName}/>
+    </div>
+  );
+}
+
+// ── COO: Attendance Report ────────────────────────────────────────────────────
+function COOAttendReport({user,sigName,letterhead,shareReport}){
+  const [reports,setReports]=useState([]);
+  const [loading,setLoading]=useState(true);
+  useEffect(()=>{
+    getDocs(collection(db,"attendanceReports"))
+      .then(s=>{
+        const all=s.docs.map(d=>({id:d.id,...d.data()}));
+        all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+        setReports(all); setLoading(false);
+      }).catch(()=>setLoading(false));
+  },[]);
+
+  const byDept=DEPTS.reduce((a,d)=>{a[d]=reports.filter(r=>r.dept===d);return a},{});
+
+  const buildText=()=>{
+    let t=letterhead("COO ATTENDANCE REPORT");
+    let gP=0,gA=0,gC=0;
+    DEPTS.forEach(dept=>{
+      const dr=byDept[dept]||[];
+      if(!dr.length) return;
+      t+=`\n🏢 ${dept}\n`;
+      dr.forEach(r=>{
+        t+=`  Month: ${r.month} (${r.status||"pending"})\n`;
+        (r.summary||[]).forEach(w=>{
+          t+=`    ${w.name}: ${w.present}✓ ${w.absent}✗ GH₵${w.chopMoney||0}\n`;
+          gP+=w.present||0; gA+=w.absent||0; gC+=w.chopMoney||0;
+        });
+      });
+    });
+    t+=`\n${"─".repeat(40)}\nTOTALS: ${gP} Present | ${gA} Absent | GH₵${gC}\n`;
+    return t;
+  };
+
+  if(loading) return <div style={{textAlign:"center",color:"#aaa",padding:"40px"}}>Loading…</div>;
+  const sh=shareReport(buildText(),"COO Attendance Report");
+  return(
+    <div>
+      {DEPTS.map(dept=>{
+        const dr=byDept[dept]||[];
+        if(!dr.length) return null;
+        return(
+          <div key={dept}>
+            <div style={{fontWeight:700,color:C.forest,fontSize:"0.82rem",
+              textTransform:"uppercase",letterSpacing:"0.06em",
+              margin:"14px 0 6px",display:"flex",
+              justifyContent:"space-between",alignItems:"center"}}>
+              <span>🏢 {dept}</span>
+              <span style={{color:"#aaa",fontSize:"0.68rem",fontWeight:400}}>
+                {dr.length} report{dr.length!==1?"s":""}</span>
+            </div>
+            {dr.map((r,i)=>(
+              <Card key={i} style={{marginBottom:"8px",
+                borderLeft:`4px solid ${r.status==="pending"?C.warn:C.ok}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",
+                  alignItems:"center",marginBottom:"6px"}}>
+                  <div style={{fontWeight:800,color:C.forest}}>{r.month}</div>
+                  <Badge color={r.status==="pending"?C.warn:C.ok}>
+                    {(r.status||"pending").toUpperCase()}</Badge>
+                </div>
+                {(r.summary||[]).map((w,j)=>(
+                  <div key={j} style={{display:"flex",justifyContent:"space-between",
+                    padding:"4px 0",borderTop:`1px dashed ${C.border}`,
+                    fontSize:"0.78rem"}}>
+                    <span style={{color:C.forest,fontWeight:600}}>{w.name}</span>
+                    <span style={{color:C.ok}}>{w.present}✓</span>
+                    <span style={{color:C.danger}}>{w.absent}✗</span>
+                    <span style={{color:C.gold,fontWeight:700}}>GH₵{w.chopMoney||0}</span>
+                  </div>
+                ))}
+              </Card>
+            ))}
+          </div>
+        );
+      })}
+      {!reports.length&&<div style={{textAlign:"center",color:"#aaa",padding:"30px"}}>No attendance reports yet.</div>}
+      <ShareCard sh={sh} title="Attendance Report" sigName={sigName}/>
+    </div>
+  );
+}
+
+// ── COO: Chop Money Report ────────────────────────────────────────────────────
+function COOChopReport({user,sigName,letterhead,shareReport}){
+  const [chops,setChops]=useState([]);
+  const [loading,setLoading]=useState(true);
+  useEffect(()=>{
+    getDocs(collection(db,"chopMoney"))
+      .then(s=>{
+        const all=s.docs.map(d=>({id:d.id,...d.data()}));
+        all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+        setChops(all); setLoading(false);
+      }).catch(()=>setLoading(false));
+  },[]);
+
+  const grandTotal=chops.reduce((s,c)=>s+(c.totalAmount||0),0);
+  const paid=chops.filter(c=>c.status==="paid");
+  const pending=chops.filter(c=>c.status==="pending");
+
+  const buildText=()=>{
+    let t=letterhead("COO CHOP MONEY REPORT");
+    t+=`\nTotal Records: ${chops.length} | Paid: ${paid.length} | Pending: ${pending.length}\n`;
+    t+=`Grand Total: GH₵${grandTotal}\n`;
+    chops.forEach(c=>{
+      t+=`\n🏢 ${c.dept} — ${c.weekStart||""} to ${c.weekEnd||""}\n`;
+      t+=`  Status: ${c.status||"pending"} | Total: GH₵${c.totalAmount||0}\n`;
+      (c.chopList||[]).forEach(w=>t+=`  • ${w.name}: ${w.days} days — GH₵${w.amount}\n`);
+    });
+    return t;
+  };
+
+  if(loading) return <div style={{textAlign:"center",color:"#aaa",padding:"40px"}}>Loading…</div>;
+  const sh=shareReport(buildText(),"COO Chop Money Report");
+  return(
+    <div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px",margin:"12px 0"}}>
+        {[{l:"Grand Total",v:`GH₵${grandTotal}`,c:C.gold},
+          {l:"Pending",v:pending.length,c:C.warn}].map((s,i)=>(
+          <Card key={i} style={{marginBottom:0,textAlign:"center",
+            borderTop:`3px solid ${s.c}`}}>
+            <div style={{fontSize:"1.3rem",fontWeight:800,color:s.c}}>{s.v}</div>
+            <div style={{fontSize:"0.68rem",color:"#888",textTransform:"uppercase"}}>{s.l}</div>
+          </Card>
+        ))}
+      </div>
+      {chops.map((c,i)=>(
+        <Card key={i} style={{marginBottom:"8px",
+          borderLeft:`4px solid ${c.status==="paid"?C.ok:C.warn}`}}>
+          <div style={{display:"flex",justifyContent:"space-between",
+            alignItems:"center",marginBottom:"6px"}}>
+            <div>
+              <div style={{fontWeight:800,color:C.forest}}>{c.dept}</div>
+              <div style={{fontSize:"0.72rem",color:"#888"}}>
+                {c.weekStart} → {c.weekEnd}</div>
+            </div>
+            <div style={{textAlign:"right"}}>
+              <div style={{fontWeight:800,color:C.gold,fontSize:"1rem"}}>
+                GH₵{c.totalAmount||0}</div>
+              <Badge color={c.status==="paid"?C.ok:C.warn}>
+                {(c.status||"pending").toUpperCase()}</Badge>
+            </div>
+          </div>
+          {(c.chopList||[]).map((w,j)=>(
+            <div key={j} style={{display:"flex",justifyContent:"space-between",
+              padding:"3px 0",borderTop:`1px dashed ${C.border}`,
+              fontSize:"0.75rem"}}>
+              <span style={{color:C.forest}}>{w.name}</span>
+              <span style={{color:"#888"}}>{w.days} days</span>
+              <span style={{color:C.gold,fontWeight:700}}>GH₵{w.amount}</span>
+            </div>
+          ))}
+        </Card>
+      ))}
+      {!chops.length&&<div style={{textAlign:"center",color:"#aaa",padding:"30px"}}>No chop money records yet.</div>}
+      <ShareCard sh={sh} title="Chop Money Report" sigName={sigName}/>
+    </div>
+  );
+}
+
+// ── COO: HR Reports Received ──────────────────────────────────────────────────
+function COOHRReport({user,sigName,letterhead,shareReport}){
+  const [reports,setReports]=useState([]);
+  const [detail,setDetail]=useState(null);
+  const [loading,setLoading]=useState(true);
+  useEffect(()=>{
+    getDocs(collection(db,"hrReports"))
+      .then(s=>{
+        const all=s.docs.map(d=>({id:d.id,...d.data()}));
+        all.sort((a,b)=>(b.sentAt?.seconds||0)-(a.sentAt?.seconds||0));
+        setReports(all); setLoading(false);
+      }).catch(()=>setLoading(false));
+  },[]);
+
+  const buildText=()=>{
+    let t=letterhead("COO HR REPORTS SUMMARY");
+    t+=`\nTotal Reports Received: ${reports.length}\n\n`;
+    reports.forEach((r,i)=>{
+      t+=`${i+1}. ${(r.type||"").toUpperCase()} — ${r.month}\n`;
+      t+=`   Sent by: ${r.sentBy||"HR"} via ${r.method||"in-app"}\n`;
+      if(r.text) t+=`\n${r.text}\n\n${"─".repeat(40)}\n\n`;
+    });
+    return t;
+  };
+
+  if(loading) return <div style={{textAlign:"center",color:"#aaa",padding:"40px"}}>Loading…</div>;
+  const sh=shareReport(buildText(),"COO HR Reports Summary");
+  return(
+    <div>
+      {!reports.length&&(
+        <div style={{textAlign:"center",color:"#aaa",padding:"30px"}}>
+          No HR reports received yet.<br/>
+          <span style={{fontSize:"0.78rem"}}>HR sends reports via the 📤 Report tab.</span>
+        </div>
+      )}
+      {reports.map((r,i)=>(
+        <Card key={i} style={{marginBottom:"8px",cursor:"pointer",
+          borderLeft:`4px solid ${C.blue}`}}
+          onClick={()=>setDetail(r)}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <div style={{fontWeight:800,color:C.forest,textTransform:"capitalize"}}>
+                {r.type||"Report"} Report</div>
+              <div style={{fontSize:"0.72rem",color:"#888"}}>
+                {r.month} · by {r.sentBy||"HR"} · via {r.method||"in-app"}</div>
+            </div>
+            <div style={{fontSize:"0.78rem",color:C.blue,fontWeight:700}}>View →</div>
+          </div>
+        </Card>
+      ))}
+      {detail&&(
+        <Modal title="📨 HR Report" onClose={()=>setDetail(null)}>
+          <div style={{fontWeight:800,color:C.forest,marginBottom:"4px",textTransform:"capitalize"}}>
+            {detail.type} Report — {detail.month}</div>
+          <div style={{fontSize:"0.72rem",color:"#888",marginBottom:"10px"}}>
+            Sent by {detail.sentBy}</div>
+          <div style={{background:C.mist,padding:"12px",borderRadius:"8px",
+            fontSize:"0.78rem",whiteSpace:"pre-wrap",fontFamily:"monospace",
+            maxHeight:"300px",overflowY:"auto",color:C.forest}}>
+            {detail.text||"No content"}
+          </div>
+        </Modal>
+      )}
+      <ShareCard sh={sh} title="HR Reports Summary" sigName={sigName}/>
+    </div>
+  );
+}
+
+// ── Shared Share Card component ───────────────────────────────────────────────
+function ShareCard({sh,title,sigName}){
+  return(
+    <Card style={{marginTop:"14px",border:`1px solid ${C.border}`}}>
+      <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"10px"}}>
+        <img src="/icon192.png" alt="KKTR" style={{width:"28px",height:"28px",
+          borderRadius:"6px",objectFit:"cover"}}
+          onError={e=>e.target.style.display="none"}/>
+        <div>
+          <div style={{fontWeight:800,color:C.forest,fontSize:"0.85rem"}}>
+            📤 Share {title}</div>
+          <div style={{fontSize:"0.65rem",color:"#aaa"}}>Signed: {sigName}</div>
+        </div>
+      </div>
+      <div style={{display:"flex",gap:"8px"}}>
+        <Btn onClick={sh.whatsapp} color="#25D366"
+          style={{flex:1,justifyContent:"center"}}>📱 WhatsApp</Btn>
+        <Btn onClick={sh.email} color={C.timber}
+          style={{flex:1,justifyContent:"center"}}>✉ Email</Btn>
+        <Btn onClick={sh.copy} color={C.sage}
+          style={{flex:1,justifyContent:"center"}}>📋 Copy</Btn>
+      </div>
+    </Card>
+  );
+}
+
 function AIModule({user}){
   const [msgs,setMsgs]=useState([{role:"assistant",text:
     "Hello! I'm your KKTR AI assistant.\nAsk about stock, restock alerts, or pending requisitions."}]);
@@ -3763,7 +4007,7 @@ function SettingsModule({user,onLogout,onInstall}){
         <div style={{fontWeight:800,color:C.cream,fontSize:"1rem"}}>
           Kete Krachi Timber Recovery</div>
         <div style={{fontSize:"0.75rem",color:"rgba(245,237,214,0.7)",marginTop:"4px"}}>
-          Store Management System v9.2</div>
+          Store Management System v9.3</div>
         <div style={{fontSize:"0.7rem",color:"rgba(245,237,214,0.4)"}}>
           Built by Anaase-Tech Ltd · {new Date().getFullYear()} · Offline-First + HR Reports + Auto-Sync</div>
       </Card>
@@ -4047,7 +4291,9 @@ function AppInner(){
         {tab==="attendance"&&<AttendanceModule user={user}/>}
         {tab==="hr"&&<HRModule user={user}/>}
         {tab==="receipts"&&<ReceiptsModule user={user}/>}
-        {tab==="reports"&&<ReportsModule user={user}/>}
+        {tab==="reports"&&(isCOO
+          ?<COOReportsModule user={user}/>
+          :<ReportsModule user={user}/>)}
         {tab==="chat"&&<ChatModule user={user}/>}
         {tab==="ai"&&<AIModule user={user}/>}
         {tab==="settings"&&<SettingsModule user={user} onLogout={logout}
