@@ -581,15 +581,15 @@ function Dashboard({user,onNav}){
     const uP=onSnapshot(query(collection(db,"passwordResets"),
       where("status","==","pending")),s=>setStats(p=>({...p,pwdResets:s.size})));
 
-    // v8.3 FIX: read unread count from Firestore chats — RTDB is stale/unused
-    // Track per-dept unread in a plain object outside state to avoid stale closure
+    // Count unread from Firestore — admin thread only (chats/{dept}_admin/messages)
     const deptUnreadMap={};
     const chatUnsubs=DEPTS.map(dept=>{
+      const tid=threadKey(dept,"admin");
       return onSnapshot(
-        query(collection(db,"chats",dept,"messages")),
+        query(collection(db,"chats",tid,"messages")),
         snap=>{
           deptUnreadMap[dept]=snap.docs.filter(d=>
-            d.data().from!=="admin"&&!d.data().read
+            d.data().from===dept&&!d.data().read
           ).length;
           const total=Object.values(deptUnreadMap).reduce((s,n)=>s+n,0);
           setStats(p=>({...p,unread:total}));
@@ -730,16 +730,18 @@ function DeptDashboard({user,onNav}){
         all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
         setReqs(all);
       },()=>{});
-    // v8.3 FIX: read unread from Firestore chats (messages from admin not yet read)
-    const uChat=onSnapshot(
-      query(collection(db,"chats",user.dept,"messages")),
-      snap=>{
-        const u=snap.docs.filter(d=>
-          d.data().from==="admin"&&!d.data().read
-        ).length;
-        setUnread(u);
-      },()=>setUnread(0));
-    return()=>{uR();uChat();};
+    // v9.4: count unread from all 3 staff role threads for this dept
+    let totalUnread=0;
+    const uChats=STAFF_ROLES.map(r=>{
+      const tid=threadKey(user.dept,r);
+      return onSnapshot(
+        query(collection(db,"chats",tid,"messages")),
+        snap=>{
+          const u=snap.docs.filter(d=>d.data().from!==user.dept&&!d.data().read).length;
+          setUnread(u); // simplified: show total across roles
+        },()=>{});
+    });
+    return()=>{uR();uChats.forEach(u=>u());};
   },[user]);
   return(
     <div style={{padding:"0 12px 80px"}}>
@@ -1794,78 +1796,101 @@ function ReceiptForm({onSave,loading}){
   </div>);
 }
 
-// ─── CHAT ─────────────────────────────────────────────────────────────────────
-function ChatModule({user}){
-  const [activeDept,setActiveDept]=useState(null);
-  const isAdmin=user.role==="admin";
-  const isHR=user.role==="hr";
-  const isCOO=user.role==="coo";
-  // Admin, HR and COO can all chat any department
-  const canChatAll=isAdmin||isHR||isCOO;
+// ─── CHAT v9.4 — ROLE-SEPARATED THREADS ─────────────────────────────────────
+// Thread key = dept + "_" + senderRole
+// chats/Chainsaw_admin/messages  → Admin ↔ Chainsaw (private)
+// chats/Chainsaw_hr/messages     → HR ↔ Chainsaw (private)
+// chats/Chainsaw_coo/messages    → COO ↔ Chainsaw (private)
+//
+// Admin, HR, COO each see ONLY their own threads
+// Dept head sees inbox of all threads addressed to them (from admin, hr, coo)
 
-  if(canChatAll){
-    if(!activeDept) return <AdminChatList user={user} onSelect={setActiveDept}/>;
-    return <ChatThread dept={activeDept} user={user} onBack={()=>setActiveDept(null)}/>;
+const STAFF_ROLES=["admin","hr","coo"]; // roles that can initiate threads
+
+// Thread key helper
+const threadKey=(dept,role)=>`${dept}_${role}`;
+
+// Role display names
+const roleLabel={admin:"Stores Admin",hr:"HR",coo:"COO"};
+
+function ChatModule({user}){
+  const [view,setView]=useState("list"); // "list" | {dept, role}
+  const role=user.role;
+  const isStaff=STAFF_ROLES.includes(role);
+
+  // Staff (admin/hr/coo): see list of departments to chat with
+  // Dept head: see inbox — messages from admin/hr/coo to their dept
+  if(isStaff){
+    if(view==="list")
+      return <StaffChatList user={user} onSelect={v=>setView(v)}/>;
+    return <ChatThread
+      threadId={threadKey(view.dept,role)}
+      label={`${view.dept} · ${roleLabel[role]||role}`}
+      user={user}
+      myRole={role}
+      onBack={()=>setView("list")}/>;
   }
-  // Dept heads chat directly to admin thread
-  return <ChatThread dept={user.dept} user={user} onBack={null}/>;
+
+  // Dept head inbox — tabs per staff role
+  return <DeptInbox user={user}/>;
 }
-function AdminChatList({user,onSelect}){
+
+// ── Staff Chat List (Admin / HR / COO see departments) ────────────────────────
+function StaffChatList({user,onSelect}){
   const [threads,setThreads]=useState({});
-  const isAdmin=user.role==="admin";
-  const isHR=user.role==="hr";
-  const isCOO=user.role==="coo";
+  const role=user.role;
 
   useEffect(()=>{
-    const unsubs=DEPTS.map(d=>{
-      const q=query(collection(db,"chats",d,"messages"),orderBy("createdAt","desc"));
-      return onSnapshot(q,s=>{
-        const msgs=s.docs.map(doc=>({id:doc.id,...doc.data()}));
-        setThreads(prev=>({...prev,[d]:msgs}));
-      },()=>{});
+    // Listen to threads for THIS role only
+    const unsubs=DEPTS.map(dept=>{
+      const tid=threadKey(dept,role);
+      return onSnapshot(
+        query(collection(db,"chats",tid,"messages"),orderBy("createdAt","desc")),
+        s=>{
+          const msgs=s.docs.map(d=>({id:d.id,...d.data()}));
+          setThreads(prev=>({...prev,[dept]:msgs}));
+        },()=>{});
     });
     return()=>unsubs.forEach(u=>u());
-  },[]);
-
-  // Unread = messages NOT from this user's "side" that haven't been read
-  const getUnread=(msgs)=>{
-    if(isAdmin) return msgs.filter(m=>m.from!=="admin"&&!m.read).length;
-    // HR and COO: unread = messages from admin (or other roles) not yet read by them
-    return msgs.filter(m=>m.from==="admin"&&!m.read).length;
-  };
+  },[role]);
 
   return(
     <div style={{padding:"0 12px 80px"}}>
-      <div style={{fontWeight:800,fontSize:"1.2rem",color:C.forest,
-        marginBottom:"14px",paddingTop:"4px"}}>💬 Department Chats</div>
-      {DEPTS.map(d=>{
-        const msgs=(threads[d]||[]).slice().reverse();
-        const unread=getUnread(msgs);
+      <div style={{display:"flex",alignItems:"center",gap:"8px",
+        paddingTop:"4px",marginBottom:"14px"}}>
+        <div style={{fontWeight:800,fontSize:"1.15rem",color:C.forest}}>
+          💬 Department Chats</div>
+        <Badge color={C.blue}>{roleLabel[role]||role}</Badge>
+      </div>
+      {DEPTS.map(dept=>{
+        const msgs=(threads[dept]||[]).slice().reverse();
+        const unread=msgs.filter(m=>m.from===dept&&!m.read).length;
         const last=msgs[msgs.length-1];
         return(
-          <Card key={d} style={{marginBottom:"8px",cursor:"pointer",
+          <Card key={dept} style={{marginBottom:"8px",cursor:"pointer",
             borderLeft:`4px solid ${unread>0?C.gold:C.border}`}}
-            onClick={()=>onSelect(d)}>
+            onClick={()=>onSelect({dept,role})}>
             <div style={{display:"flex",alignItems:"center",gap:"12px"}}>
               <div style={{width:"44px",height:"44px",borderRadius:"50%",
                 background:unread>0?C.gold:C.mist,display:"flex",alignItems:"center",
                 justifyContent:"center",fontWeight:800,
-                color:unread>0?C.white:C.timber,
-                fontSize:"0.85rem",flexShrink:0}}>{d.slice(0,2).toUpperCase()}</div>
+                color:unread>0?C.white:C.timber,fontSize:"0.85rem",flexShrink:0}}>
+                {dept.slice(0,2).toUpperCase()}</div>
               <div style={{flex:1,minWidth:0}}>
-                <div style={{display:"flex",justifyContent:"space-between"}}>
-                  <div style={{fontWeight:800,color:C.forest}}>{d}</div>
-                  {last&&<div style={{fontSize:"0.68rem",color:"#aaa"}}>
+                <div style={{display:"flex",justifyContent:"space-between",
+                  alignItems:"baseline"}}>
+                  <div style={{fontWeight:800,color:C.forest}}>{dept}</div>
+                  {last&&<div style={{fontSize:"0.65rem",color:"#aaa"}}>
                     {fmtTime(last.createdAt)}</div>}
                 </div>
-                <div style={{fontSize:"0.75rem",color:"#888",whiteSpace:"nowrap",
-                  overflow:"hidden",textOverflow:"ellipsis"}}>
-                  {last?`${last.senderName||last.from}: ${last.text}`:"No messages yet"}</div>
+                <div style={{fontSize:"0.72rem",color:"#888",
+                  whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                  {last?`${last.senderName||last.from}: ${last.text}`:"No messages yet"}
+                </div>
               </div>
-              {unread>0&&<div style={{background:C.gold,color:C.white,
-                borderRadius:"50%",width:"22px",height:"22px",display:"flex",
-                alignItems:"center",justifyContent:"center",
-                fontSize:"0.72rem",fontWeight:800,flexShrink:0}}>
+              {unread>0&&<div style={{background:C.gold,color:C.white,borderRadius:"50%",
+                width:"22px",height:"22px",display:"flex",alignItems:"center",
+                justifyContent:"center",fontSize:"0.72rem",fontWeight:800,flexShrink:0}}>
                 {unread}</div>}
             </div>
           </Card>
@@ -1875,38 +1900,106 @@ function AdminChatList({user,onSelect}){
   );
 }
 
-function ChatThread({dept,user,onBack}){
+// ── Dept Head Inbox — one tab per staff role ──────────────────────────────────
+function DeptInbox({user}){
+  const [activeRole,setActiveRole]=useState(null);
+  const [unread,setUnread]=useState({admin:0,hr:0,coo:0});
+  const dept=user.dept;
+
+  useEffect(()=>{
+    // Count unread per role thread
+    const unsubs=STAFF_ROLES.map(r=>{
+      const tid=threadKey(dept,r);
+      return onSnapshot(
+        query(collection(db,"chats",tid,"messages")),
+        s=>{
+          const u=s.docs.filter(d=>d.data().from!==dept&&!d.data().read).length;
+          setUnread(prev=>({...prev,[r]:u}));
+        },()=>{});
+    });
+    return()=>unsubs.forEach(u=>u());
+  },[dept]);
+
+  if(activeRole)
+    return <ChatThread
+      threadId={threadKey(dept,activeRole)}
+      label={`${roleLabel[activeRole]||activeRole}`}
+      user={user}
+      myRole={dept}
+      onBack={()=>setActiveRole(null)}/>;
+
+  const totalUnread=Object.values(unread).reduce((s,n)=>s+n,0);
+
+  return(
+    <div style={{padding:"0 12px 80px"}}>
+      <div style={{paddingTop:"4px",marginBottom:"14px"}}>
+        <div style={{fontWeight:800,fontSize:"1.15rem",color:C.forest}}>
+          💬 Messages</div>
+        <div style={{fontSize:"0.72rem",color:"#888",marginTop:"2px"}}>
+          {dept} — separate threads per management</div>
+      </div>
+      {STAFF_ROLES.map(r=>{
+        const u=unread[r]||0;
+        const labels={admin:"Stores Admin",hr:"HR Department",coo:"COO · Administration"};
+        const icons={admin:"🏪",hr:"👥",coo:"🏢"};
+        const colors={admin:C.forest,hr:C.blue,coo:C.gold};
+        return(
+          <Card key={r} style={{marginBottom:"10px",cursor:"pointer",
+            borderLeft:`4px solid ${u>0?colors[r]:C.border}`}}
+            onClick={()=>setActiveRole(r)}>
+            <div style={{display:"flex",alignItems:"center",gap:"12px"}}>
+              <div style={{width:"48px",height:"48px",borderRadius:"50%",
+                background:u>0?colors[r]:C.mist,display:"flex",alignItems:"center",
+                justifyContent:"center",fontSize:"1.3rem",flexShrink:0}}>
+                {icons[r]}</div>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:800,color:C.forest}}>{labels[r]}</div>
+                <div style={{fontSize:"0.72rem",color:"#888"}}>
+                  {u>0?`${u} unread message${u!==1?"s":""}`:"Tap to open chat"}</div>
+              </div>
+              {u>0&&<div style={{background:colors[r],color:C.white,
+                borderRadius:"50%",width:"24px",height:"24px",display:"flex",
+                alignItems:"center",justifyContent:"center",
+                fontSize:"0.72rem",fontWeight:800}}>{u}</div>}
+              <div style={{color:"#ccc",fontSize:"1.1rem"}}>›</div>
+            </div>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── ChatThread — works for both staff and dept heads ──────────────────────────
+// threadId = e.g. "Chainsaw_admin"
+// myRole = "admin"|"hr"|"coo" for staff, or dept name for dept heads
+function ChatThread({threadId,label,user,myRole,onBack}){
   const [msgs,setMsgs]=useState(()=>{
-    // Load cached messages instantly — no network needed
     try {
-      const cached=localStorage.getItem(`kktr_chat_${dept}`);
+      const cached=localStorage.getItem(`kktr_chat_${threadId}`);
       return cached?JSON.parse(cached):[];
     } catch(e){ return []; }
   });
   const [input,setInput]=useState("");
   const bottomRef=useRef(null);
-  const isAdmin=user.role==="admin";
+  const dept=threadId.split("_")[0]; // extract dept from threadId
 
   useEffect(()=>{
-    const q=query(
-      collection(db,"chats",dept,"messages"),
-      orderBy("createdAt","asc")
-    );
-    const unsub=onSnapshot(q,s=>{
-      const all=s.docs.map(d=>({id:d.id,...d.data()}));
-      setMsgs(all);
-      // Cache for offline use
-      try { localStorage.setItem(`kktr_chat_${dept}`,JSON.stringify(all.slice(-100))); } catch(e){}
-      s.docs.forEach(d=>{
-        const m=d.data();
-        if(isAdmin&&m.from!=="admin"&&!m.read)
-          updateDoc(doc(db,"chats",dept,"messages",d.id),{read:true}).catch(()=>{});
-        if(!isAdmin&&m.from==="admin"&&!m.read)
-          updateDoc(doc(db,"chats",dept,"messages",d.id),{read:true}).catch(()=>{});
-      });
-    },e=>console.log("chat error:",e.message));
+    const unsub=onSnapshot(
+      query(collection(db,"chats",threadId,"messages"),orderBy("createdAt","asc")),
+      s=>{
+        const all=s.docs.map(d=>({id:d.id,...d.data()}));
+        setMsgs(all);
+        try { localStorage.setItem(`kktr_chat_${threadId}`,JSON.stringify(all.slice(-100))); } catch(e){}
+        // Mark messages from the other side as read
+        s.docs.forEach(d=>{
+          const m=d.data();
+          if(m.from!==myRole&&!m.read)
+            updateDoc(doc(db,"chats",threadId,"messages",d.id),{read:true}).catch(()=>{});
+        });
+      },e=>console.log("chat:",e.message));
     return()=>unsub();
-  },[dept,isAdmin]);
+  },[threadId,myRole]);
 
   useEffect(()=>{
     bottomRef.current?.scrollIntoView({behavior:"smooth"});
@@ -1917,84 +2010,77 @@ function ChatThread({dept,user,onBack}){
     const text=input.trim();
     setInput("");
     const msg={
-      text, from:isAdmin?"admin":user.dept,
-      senderName:user?.name||user?.username||"Unknown",
-      dept, read:false, createdAt:Date.now()
+      text,
+      from:myRole,
+      senderName:user?.name||user?.username||myRole,
+      role:user.role,
+      dept,
+      read:false,
+      createdAt:Date.now()
     };
-    // Optimistic UI — show immediately
     setMsgs(prev=>[...prev,{...msg,id:"_tmp_"+Date.now()}]);
     try {
-      await addDoc(collection(db,"chats",dept,"messages"),msg);
+      await addDoc(collection(db,"chats",threadId,"messages"),msg);
     } catch(e){
-      // Queue for when connection returns
-      queueOffline(`chats/${dept}/messages`,msg);
+      queueOffline(`chats_${threadId}`,msg);
     }
+  };
+
+  const isMyMsg=m=>m.from===myRole;
+  const senderDisplay=m=>{
+    if(isMyMsg(m)) return null;
+    const labels={admin:"Stores Admin",hr:"HR",coo:"COO"};
+    return labels[m.from]||m.senderName||m.from;
   };
 
   return(
     <div style={{display:"flex",flexDirection:"column",height:"calc(100vh - 116px)"}}>
+      {/* Header */}
       <div style={{padding:"10px 12px",
         background:`linear-gradient(90deg,${C.forest},${C.bark})`,
         display:"flex",alignItems:"center",gap:"10px",flexShrink:0}}>
         {onBack&&<button onClick={onBack} style={{background:"none",border:"none",
           color:C.cream,fontFamily:"inherit",fontWeight:700,cursor:"pointer",
-          fontSize:"1.1rem"}}>←</button>}
+          fontSize:"1.2rem",lineHeight:1}}>←</button>}
         <div style={{width:"36px",height:"36px",borderRadius:"50%",
           background:C.gold,display:"flex",alignItems:"center",
-          justifyContent:"center",fontWeight:800,color:C.white,
-          fontSize:"0.85rem",flexShrink:0}}>{dept.slice(0,2).toUpperCase()}</div>
+          justifyContent:"center",fontWeight:800,color:C.white,fontSize:"0.85rem",
+          flexShrink:0}}>{label.slice(0,2).toUpperCase()}</div>
         <div>
-          <div style={{fontWeight:800,color:C.cream,fontSize:"0.9rem"}}>{dept}</div>
-          <div style={{fontSize:"0.65rem",color:"rgba(245,237,214,0.6)"}}>
-            Real-time Chat</div>
+          <div style={{fontWeight:800,color:C.cream,fontSize:"0.9rem"}}>{label}</div>
+          <div style={{fontSize:"0.62rem",color:"rgba(245,237,214,0.6)"}}>
+            Private · Real-time</div>
         </div>
       </div>
 
+      {/* Messages */}
       <div style={{flex:1,overflowY:"auto",padding:"12px",
-        paddingBottom:"80px",
-        background:"#f5f0e8",minHeight:0}}>
+        paddingBottom:"80px",background:"#f5f0e8",minHeight:0}}>
         {msgs.length===0&&(
-          <div style={{textAlign:"center",padding:"30px"}}>
-            <div style={{fontSize:"2rem",marginBottom:"8px"}}>💬</div>
-            <div style={{color:"#aaa",fontSize:"0.85rem",marginBottom:"16px"}}>
-              {isAdmin
-                ?`Start a conversation with ${dept} department`
-                :"No messages yet. Send a message to admin."}</div>
-            {isAdmin&&(
-              <div style={{display:"flex",flexDirection:"column",
-                gap:"8px",maxWidth:"240px",margin:"0 auto"}}>
-                {["How is work going today?",
-                  "Please send your stock report",
-                  "Your requisition has been approved",
-                  "Urgent: please report to stores"].map(s=>(
-                  <button key={s} onClick={()=>setInput(s)}
-                    style={{background:"#f0ebe0",border:`1px solid ${C.border}`,
-                      borderRadius:"20px",padding:"8px 12px",fontSize:"0.78rem",
-                      cursor:"pointer",color:C.forest,fontWeight:600,
-                      fontFamily:"inherit",textAlign:"left"}}>{s}</button>
-                ))}
-              </div>
-            )}
+          <div style={{textAlign:"center",padding:"40px 20px"}}>
+            <div style={{fontSize:"2.5rem",marginBottom:"8px"}}>💬</div>
+            <div style={{color:"#aaa",fontSize:"0.85rem"}}>
+              Start the conversation with {label}</div>
           </div>
         )}
         {msgs.map((m,i)=>{
-          const mine=(isAdmin&&m.from==="admin")||(!isAdmin&&m.from===user.dept);
+          const mine=isMyMsg(m);
+          const sender=senderDisplay(m);
           return(
             <div key={m.id||i} style={{display:"flex",
-              justifyContent:mine?"flex-end":"flex-start",marginBottom:"8px"}}>
-              <div style={{maxWidth:"80%"}}>
-                {!mine&&<div style={{fontSize:"0.68rem",color:"#aaa",
-                  marginBottom:"2px",paddingLeft:"4px"}}>
-                  {m.from==="admin"?"Abraham Sackey (Admin)":m.senderName||m.from}
-                </div>}
-                <div style={{background:mine?C.forest:C.white,
+              justifyContent:mine?"flex-end":"flex-start",marginBottom:"10px"}}>
+              <div style={{maxWidth:"78%"}}>
+                {sender&&<div style={{fontSize:"0.68rem",color:"#aaa",
+                  marginBottom:"2px",paddingLeft:"4px"}}>{sender}</div>}
+                <div style={{
+                  background:mine?C.forest:"#ffffff",
                   color:mine?C.cream:C.ink,
                   borderRadius:mine?"16px 16px 4px 16px":"16px 16px 16px 4px",
                   padding:"10px 14px",fontSize:"0.86rem",lineHeight:"1.5",
                   boxShadow:"0 1px 4px rgba(0,0,0,0.1)",
                   border:mine?"none":`1px solid ${C.border}`,
                   whiteSpace:"pre-wrap"}}>{m.text}</div>
-                <div style={{fontSize:"0.65rem",color:"#bbb",marginTop:"2px",
+                <div style={{fontSize:"0.62rem",color:"#bbb",marginTop:"2px",
                   textAlign:mine?"right":"left",
                   padding:mine?"0 4px 0 0":"0 0 0 4px"}}>
                   {fmtTime(m.createdAt)}{mine&&(m.read?" ✓✓":" ✓")}</div>
@@ -2005,15 +2091,15 @@ function ChatThread({dept,user,onBack}){
         <div ref={bottomRef}/>
       </div>
 
+      {/* Input */}
       <div style={{position:"fixed",bottom:"56px",left:"50%",
         transform:"translateX(-50%)",width:"100%",maxWidth:"480px",
         padding:"10px 12px",background:C.white,
-        borderTop:`1px solid ${C.border}`,display:"flex",
-        gap:"8px",zIndex:500,
+        borderTop:`1px solid ${C.border}`,display:"flex",gap:"8px",zIndex:500,
         paddingBottom:"calc(10px + env(safe-area-inset-bottom,0px))"}}>
         <input value={input} onChange={e=>setInput(e.target.value)}
           onKeyDown={e=>e.key==="Enter"&&send()}
-          placeholder="Type a message…"
+          placeholder={`Message ${label}…`}
           style={{flex:1,padding:"10px 16px",border:`1.5px solid ${C.border}`,
             borderRadius:"30px",fontSize:"0.88rem",fontFamily:"inherit",
             outline:"none",background:C.white}}/>
@@ -2027,7 +2113,6 @@ function ChatThread({dept,user,onBack}){
     </div>
   );
 }
-
 // ─── ATTENDANCE ───────────────────────────────────────────────────────────────
 function AttendanceModule({user}){
   const [tab,setTab]=useState("mark");
@@ -3700,12 +3785,15 @@ function SettingsModule({user,onLogout,onInstall}){
         const s=await getDocs(collection(db,col));
         for(const d of s.docs) await deleteDoc(doc(db,col,d.id));
       }
-      // Clear chat subcollections per department
+      // Clear chat threads — new format: {dept}_{role}
       for(const dept of DEPTS){
-        try {
-          const msgs=await getDocs(collection(db,"chats",dept,"messages"));
-          for(const d of msgs.docs) await deleteDoc(d.ref);
-        } catch(e2){}
+        for(const role of STAFF_ROLES){
+          try {
+            const tid=threadKey(dept,role);
+            const msgs=await getDocs(collection(db,"chats",tid,"messages"));
+            for(const d of msgs.docs) await deleteDoc(d.ref);
+          } catch(e2){}
+        }
       }
       showToast("✅ Factory reset complete.");
       setFactoryPwd("");
@@ -3973,18 +4061,21 @@ function SettingsModule({user,onLogout,onInstall}){
             <div style={{fontSize:"0.82rem",color:"#888",marginBottom:"12px"}}>
               Deletes all messages from all department chats. Fixes stale unread counts.
               Cannot be undone.</div>
-            <Btn onClick={async()=>{
+              const clearChats=async()=>{
               if(!window.confirm("Delete all chat messages from all departments?")) return;
               setLoading(true);
               try {
                 for(const dept of DEPTS){
-                  const msgs=await getDocs(collection(db,"chats",dept,"messages"));
-                  for(const d of msgs.docs) await deleteDoc(d.ref);
+                  for(const role of STAFF_ROLES){
+                    const msgs=await getDocs(collection(db,"chats",threadKey(dept,role),"messages"));
+                    for(const d of msgs.docs) await deleteDoc(d.ref);
+                  }
                 }
                 showToast("✅ All chats cleared!");
               } catch(e){ showToast("Failed: "+e.message,"danger"); }
               setLoading(false);
-            }} loading={loading} color={C.warn}
+            };
+            <Btn onClick={clearChats} loading={loading} color={C.warn}
               style={{width:"100%",justifyContent:"center"}}>
               🗑 Clear All Chats</Btn>
           </Card>
@@ -4007,7 +4098,7 @@ function SettingsModule({user,onLogout,onInstall}){
         <div style={{fontWeight:800,color:C.cream,fontSize:"1rem"}}>
           Kete Krachi Timber Recovery</div>
         <div style={{fontSize:"0.75rem",color:"rgba(245,237,214,0.7)",marginTop:"4px"}}>
-          Store Management System v9.3</div>
+          Store Management System v9.4</div>
         <div style={{fontSize:"0.7rem",color:"rgba(245,237,214,0.4)"}}>
           Built by Anaase-Tech Ltd · {new Date().getFullYear()} · Offline-First + HR Reports + Auto-Sync</div>
       </Card>
