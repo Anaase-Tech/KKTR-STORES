@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, Component } from "react";
 import { initializeApp, getApps } from "firebase/app";
 import {
-  initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
+  getFirestore, enableIndexedDbPersistence,
   doc, setDoc, getDoc, getDocs, addDoc,
   updateDoc, deleteDoc, collection, query, where, orderBy,
   onSnapshot, serverTimestamp, enableNetwork, runTransaction, increment
@@ -22,29 +22,19 @@ const firebaseConfig = {
 
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
 
-// ─── OFFLINE-FIRST FIRESTORE (v9.1) ──────────────────────────────────────────
-let db;
-try {
-  // Try full multi-tab persistence first (Chrome desktop/modern Android)
-  db = initializeFirestore(app, {
-    localCache: persistentLocalCache({
-      tabManager: persistentMultipleTabManager()
-    })
-  });
-} catch(e1) {
-  try {
-    // Fallback: single-tab persistence (older Android / Samsung browsers)
-    db = initializeFirestore(app, {
-      localCache: persistentLocalCache()
-    });
-  } catch(e2) {
-    // Final fallback: long polling (always works, no offline persistence)
-    db = initializeFirestore(app, {
-      experimentalForceLongPolling: true,
-      useFetchStreams: false
-    });
+// ─── OFFLINE-FIRST FIRESTORE (v9.2 — Firebase v9 compatible) ─────────────────
+// enableIndexedDbPersistence works in Firebase v9 modular SDK
+// Must be called immediately after getFirestore, before any reads/writes
+const db = getFirestore(app);
+enableIndexedDbPersistence(db).catch(err => {
+  if(err.code === "failed-precondition") {
+    // Multiple tabs open — persistence works in one tab only
+    console.log("[KKTR] Persistence: multiple tabs, single-tab mode");
+  } else if(err.code === "unimplemented") {
+    // Browser doesn't support IndexedDB (very rare)
+    console.log("[KKTR] Persistence: not supported on this browser");
   }
-}
+});
 const rtdb = getDatabase(app);
 const storage = getStorage(app);
 
@@ -591,15 +581,15 @@ function Dashboard({user,onNav}){
     const uP=onSnapshot(query(collection(db,"passwordResets"),
       where("status","==","pending")),s=>setStats(p=>({...p,pwdResets:s.size})));
 
-    // v8.3 FIX: read unread count from Firestore chats — RTDB is stale/unused
-    // Track per-dept unread in a plain object outside state to avoid stale closure
+    // Count unread from Firestore — admin thread only (chats/{dept}_admin/messages)
     const deptUnreadMap={};
     const chatUnsubs=DEPTS.map(dept=>{
+      const tid=threadKey(dept,"admin");
       return onSnapshot(
-        query(collection(db,"chats",dept,"messages")),
+        query(collection(db,"chats",tid,"messages")),
         snap=>{
           deptUnreadMap[dept]=snap.docs.filter(d=>
-            d.data().from!=="admin"&&!d.data().read
+            d.data().from===dept&&!d.data().read
           ).length;
           const total=Object.values(deptUnreadMap).reduce((s,n)=>s+n,0);
           setStats(p=>({...p,unread:total}));
@@ -740,16 +730,18 @@ function DeptDashboard({user,onNav}){
         all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
         setReqs(all);
       },()=>{});
-    // v8.3 FIX: read unread from Firestore chats (messages from admin not yet read)
-    const uChat=onSnapshot(
-      query(collection(db,"chats",user.dept,"messages")),
-      snap=>{
-        const u=snap.docs.filter(d=>
-          d.data().from==="admin"&&!d.data().read
-        ).length;
-        setUnread(u);
-      },()=>setUnread(0));
-    return()=>{uR();uChat();};
+    // v9.4: count unread from all 3 staff role threads for this dept
+    let totalUnread=0;
+    const uChats=STAFF_ROLES.map(r=>{
+      const tid=threadKey(user.dept,r);
+      return onSnapshot(
+        query(collection(db,"chats",tid,"messages")),
+        snap=>{
+          const u=snap.docs.filter(d=>d.data().from!==user.dept&&!d.data().read).length;
+          setUnread(u); // simplified: show total across roles
+        },()=>{});
+    });
+    return()=>{uR();uChats.forEach(u=>u());};
   },[user]);
   return(
     <div style={{padding:"0 12px 80px"}}>
@@ -800,18 +792,25 @@ function DeptDashboard({user,onNav}){
 
 // ─── COO DASHBOARD ────────────────────────────────────────────────────────────
 function COODashboard({user,onNav}){
-  const [p,setP]=useState({reqs:0,reports:0,chop:0});
+  const [p,setP]=useState({reqs:0,storesReports:0,hrReports:0,alerts:0});
   useEffect(()=>{
+    // Escalated requisitions from Stores Admin → COO only
     const uR=onSnapshot(query(collection(db,"requisitions"),
       where("approverRole","==","coo")),
       s=>setP(x=>({...x,reqs:s.docs.filter(d=>d.data().status==="pending").length})));
-    const uA=onSnapshot(query(collection(db,"attendanceReports"),
-      where("status","==","pending")),
-      s=>setP(x=>({...x,reports:s.size})));
-    const uC=onSnapshot(query(collection(db,"chopMoney"),
-      where("status","==","pending")),
-      s=>setP(x=>({...x,chop:s.size})));
-    return()=>{uR();uA();uC();};
+    // Reports sent to COO from Stores Admin
+    const uS=onSnapshot(query(collection(db,"reports"),
+      where("targetRole","==","coo"),where("type","==","stores")),
+      s=>setP(x=>({...x,storesReports:s.size})));
+    // Reports sent to COO from HR (attendance + chop money summaries)
+    const uH=onSnapshot(query(collection(db,"reports"),
+      where("targetRole","==","coo"),where("type","==","hr")),
+      s=>setP(x=>({...x,hrReports:s.size})));
+    // System alerts/notifications for COO
+    const uA=onSnapshot(query(collection(db,"notifications"),
+      where("targetRole","==","coo"),where("read","==",false)),
+      s=>setP(x=>({...x,alerts:s.size})));
+    return()=>{uR();uS();uH();uA();};
   },[]);
   return(
     <div style={{padding:"0 12px 80px"}}>
@@ -824,10 +823,12 @@ function COODashboard({user,onNav}){
       </div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"10px",marginBottom:"12px"}}>
         {[
-          {icon:"📋",l:"Pending Reqs",  v:p.reqs,   s:"awaiting approval", c:p.reqs>0?C.warn:C.ok,   action:()=>onNav("reqs")},
-          {icon:"📅",l:"Att. Reports",  v:p.reports, s:"pending review",   c:p.reports>0?C.warn:C.ok, action:()=>onNav("reqs")},
-          {icon:"💰",l:"Chop Money",    v:p.chop,   s:"pending",           c:p.chop>0?C.warn:C.ok,   action:()=>onNav("reqs")},
-          {icon:"💬",l:"Chat Admin",    v:"→",      s:"direct line",       c:C.blue,                  action:()=>onNav("chat")},
+          {icon:"📋",l:"Escalated Reqs",  v:p.reqs,         s:"from Stores Admin",  c:p.reqs>0?C.warn:C.ok,         action:()=>onNav("reqs")},
+          {icon:"🏪",l:"Stores Reports",  v:p.storesReports, s:"inventory & stock",  c:p.storesReports>0?C.blue:C.ok,action:()=>onNav("reports")},
+          {icon:"👥",l:"HR Reports",      v:p.hrReports,     s:"attendance & payroll",c:p.hrReports>0?C.blue:C.ok,   action:()=>onNav("reports")},
+          {icon:"🔔",l:"Alerts",          v:p.alerts,        s:"system notifications",c:p.alerts>0?C.danger:C.ok,    action:()=>onNav("reports")},
+          {icon:"📊",l:"All Reports",     v:"→",             s:"executive overview",  c:C.blue,                       action:()=>onNav("reports")},
+          {icon:"💬",l:"Chat",            v:"→",             s:"HR & Stores Admin",   c:C.blue,                       action:()=>onNav("chat")},
         ].map((s,i)=>(
           <Card key={i} style={{marginBottom:0,cursor:"pointer"}} onClick={s.action}>
             <div style={{fontSize:"1.6rem",marginBottom:"2px"}}>{s.icon}</div>
@@ -838,16 +839,6 @@ function COODashboard({user,onNav}){
           </Card>
         ))}
       </div>
-      <Card style={{border:`1.5px solid ${C.blue}`}}>
-        <div style={{fontWeight:800,color:C.blue,marginBottom:"8px",fontSize:"0.88rem"}}>
-          🏢 COO — Your Authority</div>
-        <div style={{fontSize:"0.78rem",color:"#888",lineHeight:1.7}}>
-          ✅ Approve requisitions from Stores Admin<br/>
-          ✅ Review HR attendance reports<br/>
-          ✅ View chop money submissions<br/>
-          ✅ Chat with all departments
-        </div>
-      </Card>
     </div>
   );
 }
@@ -1810,77 +1801,116 @@ function ReceiptForm({onSave,loading}){
   </div>);
 }
 
-// ─── CHAT ─────────────────────────────────────────────────────────────────────
+// ─── CHAT v9.4 — ROLE-SEPARATED THREADS ─────────────────────────────────────
+// Thread key = dept + "_" + senderRole
+// chats/Chainsaw_admin/messages  → Admin ↔ Chainsaw (private)
+// chats/Chainsaw_hr/messages     → HR ↔ Chainsaw (private)
+// chats/Chainsaw_coo/messages    → COO ↔ Chainsaw (private)
+//
+// Admin, HR, COO each see ONLY their own threads
+// Dept head sees inbox of all threads addressed to them (from admin, hr, coo)
+
+const STAFF_ROLES=["admin","hr","coo"]; // roles that can initiate threads
+
+// Thread key helper
+const threadKey=(a,b)=>[String(a||"").trim(),String(b||"").trim()].sort().join("__");
+
+// Role display names
+const roleLabel={admin:"Stores Admin",hr:"HR",coo:"COO"};
+
 function ChatModule({user}){
-  const [activeDept,setActiveDept]=useState(null);
-  const isAdmin=user.role==="admin";
-  const isHR=user.role==="hr"; // v8.6 strict
+  const [view,setView]=useState("list"); // "list" | {dept, role}
+  const role=user.role;
+  const isStaff=STAFF_ROLES.includes(role);
+  const isCOO=role==="coo";
 
-  // STRICT CHAT RULES:
-  // Admin → sees all departments, can message any
-  // HR → talks directly to admin only (not other departments)
-  // Dept heads → talks directly to admin only
-
-  if(isAdmin){
-    // Admin sees department list, picks who to chat
-    if(!activeDept) return <AdminChatList user={user} onSelect={setActiveDept}/>;
-    return <ChatThread dept={activeDept} user={user} onBack={()=>setActiveDept(null)}/>;
+  // COO: executive level — only chats with HR + Stores Admin (peer staff, not dept heads)
+  if(isCOO){
+    if(view==="list")
+      return <COOChatList user={user} onSelect={v=>setView(v)}/>;
+    return <ChatThread
+      threadId={threadKey(view.peerRole,role)}
+      label={`${roleLabel[view.peerRole]||view.peerRole} · COO`}
+      user={user}
+      myRole={role}
+      onBack={()=>setView("list")}/>;
   }
 
-  // HR and dept heads go directly to "admin" thread — no department selection
-  // Thread is named after their own department so admin can identify them
-  return <ChatThread dept={user.dept} user={user} onBack={null}/>;
-}
-function AdminChatList({user,onSelect}){
-  const [threads,setThreads]=useState({});
+  // Admin / HR: see list of departments to chat with
+  // Dept head: see inbox — messages from admin/hr/coo to their dept
+  if(isStaff){
+    if(view==="list")
+      return <StaffChatList user={user} onSelect={v=>setView(v)}/>;
+    return <ChatThread
+      threadId={threadKey(view.dept,role)}
+      label={`${view.dept} · ${roleLabel[role]||role}`}
+      user={user}
+      myRole={role}
+      onBack={()=>setView("list")}/>;
+  }
 
+  // Dept head inbox — tabs per staff role
+  return <DeptInbox user={user}/>;
+}
+
+// ── COO Chat — peers only (HR + Stores Admin) ────────────────────────────────
+function COOChatList({user,onSelect}){
+  const [threads,setThreads]=useState({});
+  const peers=["admin","hr"]; // COO only chats with Stores Admin + HR
   useEffect(()=>{
-    // Listen to last message in each dept using Firestore
-    const unsubs=DEPTS.map(d=>{
-      const q=query(
-        collection(db,"chats",d,"messages"),
-        orderBy("createdAt","desc")
-      );
-      return onSnapshot(q,s=>{
-        const msgs=s.docs.map(doc=>({id:doc.id,...doc.data()}));
-        setThreads(prev=>({...prev,[d]:msgs}));
-      },()=>{});
+    const unsubs=peers.map(pr=>{
+      const tid=threadKey(pr,"coo");
+      return onSnapshot(
+        query(collection(db,"chats",tid,"messages"),orderBy("createdAt","asc")),
+        s=>{
+          const msgs=s.docs.map(d=>({id:d.id,...d.data()}));
+          setThreads(prev=>({...prev,[pr]:msgs}));
+        },()=>{});
     });
     return()=>unsubs.forEach(u=>u());
   },[]);
-
+  const labels={admin:"Stores Admin",hr:"HR Department"};
+  const icons={admin:"🏪",hr:"👥"};
   return(
     <div style={{padding:"0 12px 80px"}}>
-      <div style={{fontWeight:800,fontSize:"1.2rem",color:C.forest,
-        marginBottom:"14px",paddingTop:"4px"}}>💬 Department Chats</div>
-      {DEPTS.map(d=>{
-        const msgs=(threads[d]||[]).slice().reverse();
-        const unread=msgs.filter(m=>m.from!=="admin"&&!m.read).length;
+      <div style={{display:"flex",alignItems:"center",gap:"8px",
+        paddingTop:"4px",marginBottom:"14px"}}>
+        <div style={{fontWeight:800,fontSize:"1.15rem",color:C.forest}}>
+          💬 Executive Chat</div>
+        <Badge color={C.gold}>COO</Badge>
+      </div>
+      <div style={{fontSize:"0.72rem",color:"#888",marginBottom:"12px",
+        background:C.mist,padding:"8px 10px",borderRadius:"8px"}}>
+        📌 COO communicates through HR and Stores Admin only
+      </div>
+      {peers.map(pr=>{
+        const msgs=(threads[pr]||[]);
         const last=msgs[msgs.length-1];
+        const unread=msgs.filter(m=>m.from!=="coo"&&!m.read).length;
         return(
-          <Card key={d} style={{marginBottom:"8px",cursor:"pointer",
+          <Card key={pr} style={{marginBottom:"10px",cursor:"pointer",
             borderLeft:`4px solid ${unread>0?C.gold:C.border}`}}
-            onClick={()=>onSelect(d)}>
+            onClick={()=>onSelect({peerRole:pr})}>
             <div style={{display:"flex",alignItems:"center",gap:"12px"}}>
-              <div style={{width:"44px",height:"44px",borderRadius:"50%",
+              <div style={{width:"48px",height:"48px",borderRadius:"50%",
                 background:unread>0?C.gold:C.mist,display:"flex",alignItems:"center",
-                justifyContent:"center",fontWeight:800,
-                color:unread>0?C.white:C.timber,
-                fontSize:"0.85rem",flexShrink:0}}>{d.slice(0,2).toUpperCase()}</div>
+                justifyContent:"center",fontSize:"1.3rem",flexShrink:0}}>
+                {icons[pr]}</div>
               <div style={{flex:1,minWidth:0}}>
-                <div style={{display:"flex",justifyContent:"space-between"}}>
-                  <div style={{fontWeight:800,color:C.forest}}>{d}</div>
-                  {last&&<div style={{fontSize:"0.68rem",color:"#aaa"}}>
+                <div style={{display:"flex",justifyContent:"space-between",
+                  alignItems:"baseline"}}>
+                  <div style={{fontWeight:800,color:C.forest}}>{labels[pr]}</div>
+                  {last&&<div style={{fontSize:"0.65rem",color:"#aaa"}}>
                     {fmtTime(last.createdAt)}</div>}
                 </div>
-                <div style={{fontSize:"0.75rem",color:"#888",whiteSpace:"nowrap",
-                  overflow:"hidden",textOverflow:"ellipsis"}}>
-                  {last?last.text:"No messages yet"}</div>
+                <div style={{fontSize:"0.72rem",color:"#888",
+                  whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                  {last?`${last.sender||last.from}: ${last.text}`:"No messages yet"}
+                </div>
               </div>
-              {unread>0&&<div style={{background:C.gold,color:C.white,
-                borderRadius:"50%",width:"22px",height:"22px",display:"flex",
-                alignItems:"center",justifyContent:"center",
-                fontSize:"0.72rem",fontWeight:800,flexShrink:0}}>
+              {unread>0&&<div style={{background:C.gold,color:C.white,borderRadius:"50%",
+                width:"22px",height:"22px",display:"flex",alignItems:"center",
+                justifyContent:"center",fontSize:"0.72rem",fontWeight:800,flexShrink:0}}>
                 {unread}</div>}
             </div>
           </Card>
@@ -1890,38 +1920,171 @@ function AdminChatList({user,onSelect}){
   );
 }
 
-function ChatThread({dept,user,onBack}){
+// ── Staff Chat List (Admin / HR see departments) ──────────────────────────────
+function StaffChatList({user,onSelect}){
+  const [threads,setThreads]=useState({});
+  const role=user.role;
+
+  useEffect(()=>{
+    // Listen to threads for THIS role only
+    const unsubs=DEPTS.map(dept=>{
+      const tid=threadKey(dept,role);
+      return onSnapshot(
+        query(collection(db,"chats",tid,"messages"),orderBy("createdAt","asc")),
+        s=>{
+          const msgs=s.docs.map(d=>({id:d.id,...d.data()}));
+          setThreads(prev=>({...prev,[dept]:msgs}));
+        },()=>{});
+    });
+    return()=>unsubs.forEach(u=>u());
+  },[role]);
+
+  return(
+    <div style={{padding:"0 12px 80px"}}>
+      <div style={{display:"flex",alignItems:"center",gap:"8px",
+        paddingTop:"4px",marginBottom:"14px"}}>
+        <div style={{fontWeight:800,fontSize:"1.15rem",color:C.forest}}>
+          💬 Department Chats</div>
+        <Badge color={C.blue}>{roleLabel[role]||role}</Badge>
+      </div>
+      {DEPTS.map(dept=>{
+        const msgs=(threads[dept]||[]).slice().reverse();
+        const unread=msgs.filter(m=>m.from===dept&&!m.read).length;
+        const last=msgs[msgs.length-1];
+        return(
+          <Card key={dept} style={{marginBottom:"8px",cursor:"pointer",
+            borderLeft:`4px solid ${unread>0?C.gold:C.border}`}}
+            onClick={()=>onSelect({dept,role})}>
+            <div style={{display:"flex",alignItems:"center",gap:"12px"}}>
+              <div style={{width:"44px",height:"44px",borderRadius:"50%",
+                background:unread>0?C.gold:C.mist,display:"flex",alignItems:"center",
+                justifyContent:"center",fontWeight:800,
+                color:unread>0?C.white:C.timber,fontSize:"0.85rem",flexShrink:0}}>
+                {dept.slice(0,2).toUpperCase()}</div>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{display:"flex",justifyContent:"space-between",
+                  alignItems:"baseline"}}>
+                  <div style={{fontWeight:800,color:C.forest}}>{dept}</div>
+                  {last&&<div style={{fontSize:"0.65rem",color:"#aaa"}}>
+                    {fmtTime(last.createdAt)}</div>}
+                </div>
+                <div style={{fontSize:"0.72rem",color:"#888",
+                  whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                  {last?`${last.senderName||last.from}: ${last.text}`:"No messages yet"}
+                </div>
+              </div>
+              {unread>0&&<div style={{background:C.gold,color:C.white,borderRadius:"50%",
+                width:"22px",height:"22px",display:"flex",alignItems:"center",
+                justifyContent:"center",fontSize:"0.72rem",fontWeight:800,flexShrink:0}}>
+                {unread}</div>}
+            </div>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Dept Head Inbox — one tab per staff role ──────────────────────────────────
+function DeptInbox({user}){
+  const [activeRole,setActiveRole]=useState(null);
+  const [unread,setUnread]=useState({admin:0,hr:0,coo:0});
+  const dept=user.dept;
+
+  useEffect(()=>{
+    // Count unread per role thread
+    const unsubs=STAFF_ROLES.map(r=>{
+      const tid=threadKey(dept,r);
+      return onSnapshot(
+        query(collection(db,"chats",tid,"messages")),
+        s=>{
+          const u=s.docs.filter(d=>d.data().from!==dept&&!d.data().read).length;
+          setUnread(prev=>({...prev,[r]:u}));
+        },()=>{});
+    });
+    return()=>unsubs.forEach(u=>u());
+  },[dept]);
+
+  if(activeRole)
+    return <ChatThread
+      threadId={threadKey(dept,activeRole)}
+      label={`${roleLabel[activeRole]||activeRole}`}
+      user={user}
+      myRole={dept}
+      onBack={()=>setActiveRole(null)}/>;
+
+  const totalUnread=Object.values(unread).reduce((s,n)=>s+n,0);
+
+  return(
+    <div style={{padding:"0 12px 80px"}}>
+      <div style={{paddingTop:"4px",marginBottom:"14px"}}>
+        <div style={{fontWeight:800,fontSize:"1.15rem",color:C.forest}}>
+          💬 Messages</div>
+        <div style={{fontSize:"0.72rem",color:"#888",marginTop:"2px"}}>
+          {dept} — separate threads per management</div>
+      </div>
+      {STAFF_ROLES.map(r=>{
+        const u=unread[r]||0;
+        const labels={admin:"Stores Admin",hr:"HR Department",coo:"COO · Administration"};
+        const icons={admin:"🏪",hr:"👥",coo:"🏢"};
+        const colors={admin:C.forest,hr:C.blue,coo:C.gold};
+        return(
+          <Card key={r} style={{marginBottom:"10px",cursor:"pointer",
+            borderLeft:`4px solid ${u>0?colors[r]:C.border}`}}
+            onClick={()=>setActiveRole(r)}>
+            <div style={{display:"flex",alignItems:"center",gap:"12px"}}>
+              <div style={{width:"48px",height:"48px",borderRadius:"50%",
+                background:u>0?colors[r]:C.mist,display:"flex",alignItems:"center",
+                justifyContent:"center",fontSize:"1.3rem",flexShrink:0}}>
+                {icons[r]}</div>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:800,color:C.forest}}>{labels[r]}</div>
+                <div style={{fontSize:"0.72rem",color:"#888"}}>
+                  {u>0?`${u} unread message${u!==1?"s":""}`:"Tap to open chat"}</div>
+              </div>
+              {u>0&&<div style={{background:colors[r],color:C.white,
+                borderRadius:"50%",width:"24px",height:"24px",display:"flex",
+                alignItems:"center",justifyContent:"center",
+                fontSize:"0.72rem",fontWeight:800}}>{u}</div>}
+              <div style={{color:"#ccc",fontSize:"1.1rem"}}>›</div>
+            </div>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── ChatThread — works for both staff and dept heads ──────────────────────────
+// threadId = e.g. "Chainsaw_admin"
+// myRole = "admin"|"hr"|"coo" for staff, or dept name for dept heads
+function ChatThread({threadId,label,user,myRole,onBack}){
   const [msgs,setMsgs]=useState(()=>{
-    // Load cached messages instantly — no network needed
     try {
-      const cached=localStorage.getItem(`kktr_chat_${dept}`);
+      const cached=localStorage.getItem(`kktr_chat_${threadId}`);
       return cached?JSON.parse(cached):[];
     } catch(e){ return []; }
   });
   const [input,setInput]=useState("");
   const bottomRef=useRef(null);
-  const isAdmin=user.role==="admin";
+  const dept=threadId.split("_")[0]; // extract dept from threadId
 
   useEffect(()=>{
-    const q=query(
-      collection(db,"chats",dept,"messages"),
-      orderBy("createdAt","asc")
-    );
-    const unsub=onSnapshot(q,s=>{
-      const all=s.docs.map(d=>({id:d.id,...d.data()}));
-      setMsgs(all);
-      // Cache for offline use
-      try { localStorage.setItem(`kktr_chat_${dept}`,JSON.stringify(all.slice(-100))); } catch(e){}
-      s.docs.forEach(d=>{
-        const m=d.data();
-        if(isAdmin&&m.from!=="admin"&&!m.read)
-          updateDoc(doc(db,"chats",dept,"messages",d.id),{read:true}).catch(()=>{});
-        if(!isAdmin&&m.from==="admin"&&!m.read)
-          updateDoc(doc(db,"chats",dept,"messages",d.id),{read:true}).catch(()=>{});
-      });
-    },e=>console.log("chat error:",e.message));
+    const unsub=onSnapshot(
+      query(collection(db,"chats",threadId,"messages"),orderBy("createdAt","asc")),
+      s=>{
+        const all=s.docs.map(d=>({id:d.id,...d.data()}));
+        setMsgs(all);
+        try { localStorage.setItem(`kktr_chat_${threadId}`,JSON.stringify(all.slice(-100))); } catch(e){}
+        // Mark messages from the other side as read
+        s.docs.forEach(d=>{
+          const m=d.data();
+          if(m.from!==myRole&&!m.read)
+            updateDoc(doc(db,"chats",threadId,"messages",d.id),{read:true}).catch(()=>{});
+        });
+      },e=>console.log("chat:",e.message));
     return()=>unsub();
-  },[dept,isAdmin]);
+  },[threadId,myRole]);
 
   useEffect(()=>{
     bottomRef.current?.scrollIntoView({behavior:"smooth"});
@@ -1932,84 +2095,77 @@ function ChatThread({dept,user,onBack}){
     const text=input.trim();
     setInput("");
     const msg={
-      text, from:isAdmin?"admin":user.dept,
-      senderName:user?.name||user?.username||"Unknown",
-      dept, read:false, createdAt:Date.now()
+      text,
+      from:myRole,
+      senderName:user?.name||user?.username||myRole,
+      role:user.role,
+      dept,
+      read:false,
+      createdAt:Date.now()
     };
-    // Optimistic UI — show immediately
     setMsgs(prev=>[...prev,{...msg,id:"_tmp_"+Date.now()}]);
     try {
-      await addDoc(collection(db,"chats",dept,"messages"),msg);
+      await addDoc(collection(db,"chats",threadId,"messages"),msg);
     } catch(e){
-      // Queue for when connection returns
-      queueOffline(`chats/${dept}/messages`,msg);
+      queueOffline(`chats_${threadId}`,msg);
     }
+  };
+
+  const isMyMsg=m=>m.from===myRole;
+  const senderDisplay=m=>{
+    if(isMyMsg(m)) return null;
+    const labels={admin:"Stores Admin",hr:"HR",coo:"COO"};
+    return labels[m.from]||m.senderName||m.from;
   };
 
   return(
     <div style={{display:"flex",flexDirection:"column",height:"calc(100vh - 116px)"}}>
+      {/* Header */}
       <div style={{padding:"10px 12px",
         background:`linear-gradient(90deg,${C.forest},${C.bark})`,
         display:"flex",alignItems:"center",gap:"10px",flexShrink:0}}>
         {onBack&&<button onClick={onBack} style={{background:"none",border:"none",
           color:C.cream,fontFamily:"inherit",fontWeight:700,cursor:"pointer",
-          fontSize:"1.1rem"}}>←</button>}
+          fontSize:"1.2rem",lineHeight:1}}>←</button>}
         <div style={{width:"36px",height:"36px",borderRadius:"50%",
           background:C.gold,display:"flex",alignItems:"center",
-          justifyContent:"center",fontWeight:800,color:C.white,
-          fontSize:"0.85rem",flexShrink:0}}>{dept.slice(0,2).toUpperCase()}</div>
+          justifyContent:"center",fontWeight:800,color:C.white,fontSize:"0.85rem",
+          flexShrink:0}}>{label.slice(0,2).toUpperCase()}</div>
         <div>
-          <div style={{fontWeight:800,color:C.cream,fontSize:"0.9rem"}}>{dept}</div>
-          <div style={{fontSize:"0.65rem",color:"rgba(245,237,214,0.6)"}}>
-            Real-time Chat</div>
+          <div style={{fontWeight:800,color:C.cream,fontSize:"0.9rem"}}>{label}</div>
+          <div style={{fontSize:"0.62rem",color:"rgba(245,237,214,0.6)"}}>
+            Private · Real-time</div>
         </div>
       </div>
 
+      {/* Messages */}
       <div style={{flex:1,overflowY:"auto",padding:"12px",
-        paddingBottom:"80px",
-        background:"#f5f0e8",minHeight:0}}>
+        paddingBottom:"80px",background:"#f5f0e8",minHeight:0}}>
         {msgs.length===0&&(
-          <div style={{textAlign:"center",padding:"30px"}}>
-            <div style={{fontSize:"2rem",marginBottom:"8px"}}>💬</div>
-            <div style={{color:"#aaa",fontSize:"0.85rem",marginBottom:"16px"}}>
-              {isAdmin
-                ?`Start a conversation with ${dept} department`
-                :"No messages yet. Send a message to admin."}</div>
-            {isAdmin&&(
-              <div style={{display:"flex",flexDirection:"column",
-                gap:"8px",maxWidth:"240px",margin:"0 auto"}}>
-                {["How is work going today?",
-                  "Please send your stock report",
-                  "Your requisition has been approved",
-                  "Urgent: please report to stores"].map(s=>(
-                  <button key={s} onClick={()=>setInput(s)}
-                    style={{background:"#f0ebe0",border:`1px solid ${C.border}`,
-                      borderRadius:"20px",padding:"8px 12px",fontSize:"0.78rem",
-                      cursor:"pointer",color:C.forest,fontWeight:600,
-                      fontFamily:"inherit",textAlign:"left"}}>{s}</button>
-                ))}
-              </div>
-            )}
+          <div style={{textAlign:"center",padding:"40px 20px"}}>
+            <div style={{fontSize:"2.5rem",marginBottom:"8px"}}>💬</div>
+            <div style={{color:"#aaa",fontSize:"0.85rem"}}>
+              Start the conversation with {label}</div>
           </div>
         )}
         {msgs.map((m,i)=>{
-          const mine=(isAdmin&&m.from==="admin")||(!isAdmin&&m.from===user.dept);
+          const mine=isMyMsg(m);
+          const sender=senderDisplay(m);
           return(
             <div key={m.id||i} style={{display:"flex",
-              justifyContent:mine?"flex-end":"flex-start",marginBottom:"8px"}}>
-              <div style={{maxWidth:"80%"}}>
-                {!mine&&<div style={{fontSize:"0.68rem",color:"#aaa",
-                  marginBottom:"2px",paddingLeft:"4px"}}>
-                  {m.from==="admin"?"Abraham Sackey (Admin)":m.senderName||m.from}
-                </div>}
-                <div style={{background:mine?C.forest:C.white,
+              justifyContent:mine?"flex-end":"flex-start",marginBottom:"10px"}}>
+              <div style={{maxWidth:"78%"}}>
+                {sender&&<div style={{fontSize:"0.68rem",color:"#aaa",
+                  marginBottom:"2px",paddingLeft:"4px"}}>{sender}</div>}
+                <div style={{
+                  background:mine?C.forest:"#ffffff",
                   color:mine?C.cream:C.ink,
                   borderRadius:mine?"16px 16px 4px 16px":"16px 16px 16px 4px",
                   padding:"10px 14px",fontSize:"0.86rem",lineHeight:"1.5",
                   boxShadow:"0 1px 4px rgba(0,0,0,0.1)",
                   border:mine?"none":`1px solid ${C.border}`,
                   whiteSpace:"pre-wrap"}}>{m.text}</div>
-                <div style={{fontSize:"0.65rem",color:"#bbb",marginTop:"2px",
+                <div style={{fontSize:"0.62rem",color:"#bbb",marginTop:"2px",
                   textAlign:mine?"right":"left",
                   padding:mine?"0 4px 0 0":"0 0 0 4px"}}>
                   {fmtTime(m.createdAt)}{mine&&(m.read?" ✓✓":" ✓")}</div>
@@ -2020,15 +2176,15 @@ function ChatThread({dept,user,onBack}){
         <div ref={bottomRef}/>
       </div>
 
+      {/* Input */}
       <div style={{position:"fixed",bottom:"56px",left:"50%",
         transform:"translateX(-50%)",width:"100%",maxWidth:"480px",
         padding:"10px 12px",background:C.white,
-        borderTop:`1px solid ${C.border}`,display:"flex",
-        gap:"8px",zIndex:500,
+        borderTop:`1px solid ${C.border}`,display:"flex",gap:"8px",zIndex:500,
         paddingBottom:"calc(10px + env(safe-area-inset-bottom,0px))"}}>
         <input value={input} onChange={e=>setInput(e.target.value)}
           onKeyDown={e=>e.key==="Enter"&&send()}
-          placeholder="Type a message…"
+          placeholder={`Message ${label}…`}
           style={{flex:1,padding:"10px 16px",border:`1.5px solid ${C.border}`,
             borderRadius:"30px",fontSize:"0.88rem",fontFamily:"inherit",
             outline:"none",background:C.white}}/>
@@ -2042,7 +2198,6 @@ function ChatThread({dept,user,onBack}){
     </div>
   );
 }
-
 // ─── ATTENDANCE ───────────────────────────────────────────────────────────────
 function AttendanceModule({user}){
   const [tab,setTab]=useState("mark");
@@ -2801,6 +2956,13 @@ function ReportsModule({user}){
     storeTx:[],reqs:[],receipts:[]});
   const [loading,setLoading]=useState(true);
 
+  // Signature based on logged-in user
+  const sigName=user?.name||user?.username||"Unknown";
+  const sigTitle=user.role==="admin"?"Stores Manager"
+    :user.role==="hr"?"HR Manager":"Staff";
+  const sigDept=user.role==="admin"?"Stores Department"
+    :user.role==="hr"?"HR Department":user.dept||"";
+
   const getRange=()=>{
     const now=new Date();
     if(period==="daily"){const d=today();return{from:d,to:d};}
@@ -2850,36 +3012,40 @@ function ReportsModule({user}){
   const totalAmt=receipts.reduce((s,r)=>s+parseFloat(r.amount||0),0);
   const maxD=Math.max(...Object.values(deptMap),1);
 
-  const buildReport=()=>{
-    const pLabel={daily:"Daily",weekly:"Weekly",monthly:"Monthly",annual:"Annual",custom:"Custom"}[period];
-    let t=`KETE KRACHI TIMBER RECOVERY\nSTORES ${pLabel.toUpperCase()} REPORT\n${
-      from===to?new Date(from+"T12:00:00").toLocaleDateString("en-GB",
-        {day:"2-digit",month:"long",year:"numeric"})
-      :`${new Date(from+"T12:00:00").toLocaleDateString("en-GB")} – ${
-        new Date(to+"T12:00:00").toLocaleDateString("en-GB")}`}\n\n`;
-    t+=`${"─".repeat(40)}\nLUBRICANTS\n${"─".repeat(40)}\n`;
+  // ── Letterhead builder ───────────────────────────────────────────────────────
+  const letterhead=(title)=>{
+    const line="═".repeat(42);
+    return `${line}\n         KETE KRACHI TIMBER RECOVERY\n              KKTR STORES SYSTEM\n${line}\n${title}\nGenerated: ${new Date().toLocaleString("en-GB")}\n${line}\n`;
+  };
+
+  const buildStoresReport=()=>{
+    const pLabel={daily:"DAILY",weekly:"WEEKLY",monthly:"MONTHLY",annual:"ANNUAL",custom:"CUSTOM"}[period];
+    let t=letterhead(`STORES ${pLabel} REPORT\n${from===to
+      ?new Date(from+"T12:00:00").toLocaleDateString("en-GB",{day:"2-digit",month:"long",year:"numeric"})
+      :`${new Date(from+"T12:00:00").toLocaleDateString("en-GB")} – ${new Date(to+"T12:00:00").toLocaleDateString("en-GB")}`}`);
+    t+=`\n${"─".repeat(42)}\nLUBRICANTS\n${"─".repeat(42)}\n`;
     t+=`Issued: ${lubeIssued.reduce((s,x)=>s+(x.qty||0),0)} Litres (${lubeIssued.length} transactions)\n`;
     t+=`Restocked: ${lubeTx.filter(x=>x.action==="restock").reduce((s,x)=>s+(x.qty||0),0)} Litres\n\nCurrent Stock:\n`;
-    data.lubes.forEach(l=>t+=`  ${l.name}: ${l.currentStock||0} ${l.unit}${
-      (l.currentStock||0)<(l.minStock||0)?" ⚠ LOW":""}\n`);
-    t+=`\n${"─".repeat(40)}\nGENERAL STORES\n${"─".repeat(40)}\n`;
+    data.lubes.forEach(l=>t+=`  • ${l.name}: ${l.currentStock||0} ${l.unit}${(l.currentStock||0)<(l.minStock||0)?" ⚠ LOW":""}\n`);
+    t+=`\n${"─".repeat(42)}\nGENERAL STORES\n${"─".repeat(42)}\n`;
     t+=`Items Issued: ${storeIssued.length} | Restocked: ${storeTx.filter(x=>x.action==="restock").length}\n`;
-    t+=`\n${"─".repeat(40)}\nRESTOCK NEEDED\n${"─".repeat(40)}\n`;
-    if(!lowLubes.length&&!lowStore.length) t+=`All items adequately stocked.\n`;
-    lowLubes.forEach(l=>t+=`⚠ ${l.name}: ${l.currentStock||0} (min ${l.minStock})\n`);
-    lowStore.forEach(i=>t+=`⚠ ${i.name}: ${i.currentStock||0} (min ${i.minStock})\n`);
-    t+=`\n${"─".repeat(40)}\nDEPARTMENT ACTIVITY\n${"─".repeat(40)}\n`;
-    Object.entries(deptMap).sort((a,b)=>b[1]-a[1]).forEach(([d,c])=>t+=`${d}: ${c}\n`);
+    if(lowLubes.length||lowStore.length){
+      t+=`\n${"─".repeat(42)}\nRESTOCK NEEDED\n${"─".repeat(42)}\n`;
+      lowLubes.forEach(l=>t+=`⚠ ${l.name}: ${l.currentStock||0} (min ${l.minStock})\n`);
+      lowStore.forEach(i=>t+=`⚠ ${i.name}: ${i.currentStock||0} (min ${i.minStock})\n`);
+    }
+    t+=`\n${"─".repeat(42)}\nDEPARTMENT ACTIVITY\n${"─".repeat(42)}\n`;
+    Object.entries(deptMap).sort((a,b)=>b[1]-a[1]).forEach(([d,c])=>t+=`  ${d}: ${c} transactions\n`);
     t+=`\nREQUISITIONS: ${reqs.length} | Approved: ${reqs.filter(r=>r.status==="approved").length}\n`;
     t+=`RECEIPTS: ${receipts.length} | Total: GH₵${totalAmt.toFixed(2)}\n`;
-    t+=`\n${"─".repeat(40)}\nAbraham Sackey\nStores Manager\nKete Krachi Timber Recovery\nGenerated: ${new Date().toLocaleString()}\n`;
+    t+=`\n${"═".repeat(42)}\nSigned: ${sigName}\n${sigTitle}\n${sigDept}\nKete Krachi Timber Recovery\n${"═".repeat(42)}\n`;
     return t;
   };
 
-  const share=via=>{
-    const txt=buildReport();
+  const share=(via,reportFn)=>{
+    const txt=reportFn();
     if(via==="whatsapp") window.open(`https://wa.me/?text=${encodeURIComponent(txt)}`,"_blank");
-    else if(via==="email") window.open(`mailto:?subject=KKTR Stores Report&body=${encodeURIComponent(txt)}`,"_blank");
+    else if(via==="email") window.open(`mailto:?subject=KKTR Report — ${new Date().toLocaleDateString("en-GB")}&body=${encodeURIComponent(txt)}`,"_blank");
     else navigator.clipboard?.writeText(txt).then(()=>alert("Copied!"));
   };
 
@@ -2889,6 +3055,8 @@ function ReportsModule({user}){
     <div style={{padding:"0 12px 80px"}}>
       <div style={{fontWeight:800,fontSize:"1.2rem",color:C.forest,
         marginBottom:"12px",paddingTop:"4px"}}>📊 Reports & Analytics</div>
+
+      {/* Period selector */}
       <Card>
         <div style={{fontSize:"0.72rem",fontWeight:700,color:C.forest,
           textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:"8px"}}>
@@ -2912,6 +3080,8 @@ function ReportsModule({user}){
           </div>
         )}
       </Card>
+
+      {/* Stats cards */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"10px",marginBottom:"10px"}}>
         {[
           {icon:"🛢",l:"Lubes Issued",v:lubeIssued.length,
@@ -2929,6 +3099,8 @@ function ReportsModule({user}){
           </Card>
         ))}
       </div>
+
+      {/* Low stock */}
       {(lowLubes.length+lowStore.length)>0&&(
         <Card style={{border:`1.5px solid ${C.gold}`,marginBottom:"10px"}}>
           <div style={{fontWeight:800,color:C.gold,marginBottom:"8px"}}>⚠ Restock List</div>
@@ -2940,6 +3112,8 @@ function ReportsModule({user}){
             📦 {i.name}: {i.currentStock||0}/{i.minStock}</div>)}
         </Card>
       )}
+
+      {/* Dept activity */}
       {Object.keys(deptMap).length>0&&(
         <Card style={{marginBottom:"10px"}}>
           <div style={{fontWeight:800,color:C.forest,marginBottom:"10px"}}>Department Activity</div>
@@ -2957,25 +3131,399 @@ function ReportsModule({user}){
           ))}
         </Card>
       )}
+
+      {/* Share/export — letterhead with icon */}
       <Card>
-        <div style={{fontWeight:800,color:C.forest,marginBottom:"10px"}}>📤 Share Report</div>
-        <div style={{display:"flex",gap:"8px",flexWrap:"wrap"}}>
-          <Btn onClick={()=>share("whatsapp")} color="#25D366"
-            style={{flex:1,justifyContent:"center"}}>📱 WhatsApp</Btn>
-          <Btn onClick={()=>share("email")} color={C.timber}
-            style={{flex:1,justifyContent:"center"}}>✉ Email</Btn>
-          <Btn onClick={()=>share("copy")} color={C.sage}
-            style={{flex:1,justifyContent:"center"}}>📋 Copy</Btn>
+        <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"10px"}}>
+          <img src="/icon192.png" alt="KKTR" style={{width:"28px",height:"28px",
+            borderRadius:"6px",objectFit:"cover"}}
+            onError={e=>e.target.style.display="none"}/>
+          <div>
+            <div style={{fontWeight:800,color:C.forest,fontSize:"0.88rem"}}>📤 Share Report</div>
+            <div style={{fontSize:"0.68rem",color:"#aaa"}}>
+              Signed: {sigName} · {sigTitle}</div>
+          </div>
         </div>
-        <div style={{marginTop:"10px",padding:"8px",background:C.mist,
-          borderRadius:"8px",fontSize:"0.72rem",color:C.sage}}>
-          Signed: Abraham Sackey, Stores Manager</div>
+        <div style={{display:"flex",gap:"8px",flexWrap:"wrap"}}>
+          <Btn onClick={()=>share("whatsapp",buildStoresReport)}
+            color="#25D366" style={{flex:1,justifyContent:"center"}}>📱 WhatsApp</Btn>
+          <Btn onClick={()=>share("email",buildStoresReport)}
+            color={C.timber} style={{flex:1,justifyContent:"center"}}>✉ Email</Btn>
+          <Btn onClick={()=>share("copy",buildStoresReport)}
+            color={C.sage} style={{flex:1,justifyContent:"center"}}>📋 Copy</Btn>
+        </div>
       </Card>
     </div>
   );
 }
 
 // ─── AI ───────────────────────────────────────────────────────────────────────
+// ─── COO REPORTS MODULE ───────────────────────────────────────────────────────
+// COO sees reports SENT TO THEM — not stock analytics
+// 4 tabs: Requisitions | Attendance | Chop Money | HR Reports
+// Each tab has its own report with share button
+
+function COOReportsModule({user}){
+  const [tab,setTab]=useState("reqs");
+  const sigName=user?.name||user?.username||"COO";
+  const sigTitle="Chief Operations Officer";
+
+  const letterhead=(title)=>{
+    const l="═".repeat(40);
+    return `${l}\n     KETE KRACHI TIMBER RECOVERY\n          KKTR STORES SYSTEM\n${l}\n${title}\nGenerated: ${new Date().toLocaleString("en-GB")}\n${l}\n`;
+  };
+
+  const shareReport=(text,subject)=>{
+    const full=text+`\n${"═".repeat(40)}\nSigned: ${sigName}\n${sigTitle}\nKete Krachi Timber Recovery\n${"═".repeat(40)}`;
+    const encoded=encodeURIComponent(full);
+    return{
+      whatsapp:()=>window.open(`https://wa.me/?text=${encoded}`,"_blank"),
+      email:()=>window.open(`mailto:?subject=${encodeURIComponent(subject)}&body=${encoded}`,"_blank"),
+      copy:()=>navigator.clipboard?.writeText(full).then(()=>alert("Report copied!"))
+    };
+  };
+
+  return(
+    <div style={{padding:"0 12px 80px"}}>
+      <div style={{display:"flex",alignItems:"center",gap:"10px",
+        paddingTop:"4px",marginBottom:"12px"}}>
+        <img src="/icon192.png" alt="KKTR" style={{width:"32px",height:"32px",
+          borderRadius:"8px",objectFit:"cover"}}
+          onError={e=>e.target.style.display="none"}/>
+        <div style={{fontWeight:800,fontSize:"1.1rem",color:C.forest}}>
+          COO Reports</div>
+      </div>
+      <TabBar tabs={[
+        {id:"reqs",   label:"📋 Reqs"},
+        {id:"attend", label:"📅 Attend."},
+        {id:"chop",   label:"💰 Chop"},
+        {id:"hrreports",label:"📨 HR"},
+      ]} active={tab} onSelect={setTab}/>
+
+      {tab==="reqs"    &&<COOReqsReport    user={user} sigName={sigName} letterhead={letterhead} shareReport={shareReport}/>}
+      {tab==="attend"  &&<COOAttendReport  user={user} sigName={sigName} letterhead={letterhead} shareReport={shareReport}/>}
+      {tab==="chop"    &&<COOChopReport    user={user} sigName={sigName} letterhead={letterhead} shareReport={shareReport}/>}
+      {tab==="hrreports"&&<COOHRReport     user={user} sigName={sigName} letterhead={letterhead} shareReport={shareReport}/>}
+    </div>
+  );
+}
+
+// ── COO: Requisitions Report ──────────────────────────────────────────────────
+function COOReqsReport({user,sigName,letterhead,shareReport}){
+  const [reqs,setReqs]=useState([]);
+  const [loading,setLoading]=useState(true);
+  useEffect(()=>{
+    getDocs(query(collection(db,"requisitions"),where("approverRole","==","coo")))
+      .then(s=>{
+        const all=s.docs.map(d=>({id:d.id,...d.data()}));
+        all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+        setReqs(all); setLoading(false);
+      }).catch(()=>setLoading(false));
+  },[]);
+
+  const pending=reqs.filter(r=>r.status==="pending");
+  const approved=reqs.filter(r=>r.status==="approved");
+  const rejected=reqs.filter(r=>r.status==="rejected");
+
+  const buildText=()=>{
+    let t=letterhead("COO REQUISITIONS REPORT");
+    t+=`\nTotal: ${reqs.length} | Pending: ${pending.length} | Approved: ${approved.length} | Rejected: ${rejected.length}\n`;
+    t+=`\n${"─".repeat(40)}\nPENDING APPROVAL\n${"─".repeat(40)}\n`;
+    if(!pending.length) t+="None pending.\n";
+    else pending.forEach(r=>t+=`• ${r.item} — ${r.dept} (${r.requestedBy}) qty:${r.qty}\n`);
+    t+=`\n${"─".repeat(40)}\nAPPROVED\n${"─".repeat(40)}\n`;
+    if(!approved.length) t+="None approved.\n";
+    else approved.forEach(r=>t+=`✓ ${r.item} — ${r.dept} by ${r.approvedBy||"COO"}\n`);
+    return t;
+  };
+
+  if(loading) return <div style={{textAlign:"center",color:"#aaa",padding:"40px"}}>Loading…</div>;
+  const sh=shareReport(buildText(),"COO Requisitions Report");
+  return(
+    <div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"8px",margin:"12px 0"}}>
+        {[{l:"Pending",v:pending.length,c:C.warn},
+          {l:"Approved",v:approved.length,c:C.ok},
+          {l:"Rejected",v:rejected.length,c:C.danger}].map((s,i)=>(
+          <Card key={i} style={{marginBottom:0,textAlign:"center",
+            borderTop:`3px solid ${s.c}`}}>
+            <div style={{fontSize:"1.6rem",fontWeight:800,color:s.c}}>{s.v}</div>
+            <div style={{fontSize:"0.68rem",color:"#888",textTransform:"uppercase"}}>{s.l}</div>
+          </Card>
+        ))}
+      </div>
+      {reqs.map(r=>(
+        <Card key={r.id} style={{marginBottom:"8px",
+          borderLeft:`4px solid ${r.status==="pending"?C.warn:r.status==="approved"?C.ok:C.danger}`}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+            <div>
+              <div style={{fontWeight:800,color:C.forest}}>{r.item}</div>
+              <div style={{fontSize:"0.72rem",color:"#888"}}>{r.dept} · {r.requestedBy}</div>
+              <div style={{fontSize:"0.72rem",color:C.timber}}>Qty: {r.qty} {r.unit||""}</div>
+            </div>
+            <Badge color={r.status==="pending"?C.warn:r.status==="approved"?C.ok:C.danger}>
+              {(r.status||"pending").toUpperCase()}</Badge>
+          </div>
+        </Card>
+      ))}
+      {!reqs.length&&<div style={{textAlign:"center",color:"#aaa",padding:"30px"}}>No requisitions found.</div>}
+      <ShareCard sh={sh} title="Requisitions Report" sigName={sigName}/>
+    </div>
+  );
+}
+
+// ── COO: Attendance Report ────────────────────────────────────────────────────
+function COOAttendReport({user,sigName,letterhead,shareReport}){
+  const [reports,setReports]=useState([]);
+  const [loading,setLoading]=useState(true);
+  useEffect(()=>{
+    getDocs(collection(db,"attendanceReports"))
+      .then(s=>{
+        const all=s.docs.map(d=>({id:d.id,...d.data()}));
+        all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+        setReports(all); setLoading(false);
+      }).catch(()=>setLoading(false));
+  },[]);
+
+  const byDept=DEPTS.reduce((a,d)=>{a[d]=reports.filter(r=>r.dept===d);return a},{});
+
+  const buildText=()=>{
+    let t=letterhead("COO ATTENDANCE REPORT");
+    let gP=0,gA=0,gC=0;
+    DEPTS.forEach(dept=>{
+      const dr=byDept[dept]||[];
+      if(!dr.length) return;
+      t+=`\n🏢 ${dept}\n`;
+      dr.forEach(r=>{
+        t+=`  Month: ${r.month} (${r.status||"pending"})\n`;
+        (r.summary||[]).forEach(w=>{
+          t+=`    ${w.name}: ${w.present}✓ ${w.absent}✗ GH₵${w.chopMoney||0}\n`;
+          gP+=w.present||0; gA+=w.absent||0; gC+=w.chopMoney||0;
+        });
+      });
+    });
+    t+=`\n${"─".repeat(40)}\nTOTALS: ${gP} Present | ${gA} Absent | GH₵${gC}\n`;
+    return t;
+  };
+
+  if(loading) return <div style={{textAlign:"center",color:"#aaa",padding:"40px"}}>Loading…</div>;
+  const sh=shareReport(buildText(),"COO Attendance Report");
+  return(
+    <div>
+      {DEPTS.map(dept=>{
+        const dr=byDept[dept]||[];
+        if(!dr.length) return null;
+        return(
+          <div key={dept}>
+            <div style={{fontWeight:700,color:C.forest,fontSize:"0.82rem",
+              textTransform:"uppercase",letterSpacing:"0.06em",
+              margin:"14px 0 6px",display:"flex",
+              justifyContent:"space-between",alignItems:"center"}}>
+              <span>🏢 {dept}</span>
+              <span style={{color:"#aaa",fontSize:"0.68rem",fontWeight:400}}>
+                {dr.length} report{dr.length!==1?"s":""}</span>
+            </div>
+            {dr.map((r,i)=>(
+              <Card key={i} style={{marginBottom:"8px",
+                borderLeft:`4px solid ${r.status==="pending"?C.warn:C.ok}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",
+                  alignItems:"center",marginBottom:"6px"}}>
+                  <div style={{fontWeight:800,color:C.forest}}>{r.month}</div>
+                  <Badge color={r.status==="pending"?C.warn:C.ok}>
+                    {(r.status||"pending").toUpperCase()}</Badge>
+                </div>
+                {(r.summary||[]).map((w,j)=>(
+                  <div key={j} style={{display:"flex",justifyContent:"space-between",
+                    padding:"4px 0",borderTop:`1px dashed ${C.border}`,
+                    fontSize:"0.78rem"}}>
+                    <span style={{color:C.forest,fontWeight:600}}>{w.name}</span>
+                    <span style={{color:C.ok}}>{w.present}✓</span>
+                    <span style={{color:C.danger}}>{w.absent}✗</span>
+                    <span style={{color:C.gold,fontWeight:700}}>GH₵{w.chopMoney||0}</span>
+                  </div>
+                ))}
+              </Card>
+            ))}
+          </div>
+        );
+      })}
+      {!reports.length&&<div style={{textAlign:"center",color:"#aaa",padding:"30px"}}>No attendance reports yet.</div>}
+      <ShareCard sh={sh} title="Attendance Report" sigName={sigName}/>
+    </div>
+  );
+}
+
+// ── COO: Chop Money Report ────────────────────────────────────────────────────
+function COOChopReport({user,sigName,letterhead,shareReport}){
+  const [chops,setChops]=useState([]);
+  const [loading,setLoading]=useState(true);
+  useEffect(()=>{
+    getDocs(collection(db,"chopMoney"))
+      .then(s=>{
+        const all=s.docs.map(d=>({id:d.id,...d.data()}));
+        all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+        setChops(all); setLoading(false);
+      }).catch(()=>setLoading(false));
+  },[]);
+
+  const grandTotal=chops.reduce((s,c)=>s+(c.totalAmount||0),0);
+  const paid=chops.filter(c=>c.status==="paid");
+  const pending=chops.filter(c=>c.status==="pending");
+
+  const buildText=()=>{
+    let t=letterhead("COO CHOP MONEY REPORT");
+    t+=`\nTotal Records: ${chops.length} | Paid: ${paid.length} | Pending: ${pending.length}\n`;
+    t+=`Grand Total: GH₵${grandTotal}\n`;
+    chops.forEach(c=>{
+      t+=`\n🏢 ${c.dept} — ${c.weekStart||""} to ${c.weekEnd||""}\n`;
+      t+=`  Status: ${c.status||"pending"} | Total: GH₵${c.totalAmount||0}\n`;
+      (c.chopList||[]).forEach(w=>t+=`  • ${w.name}: ${w.days} days — GH₵${w.amount}\n`);
+    });
+    return t;
+  };
+
+  if(loading) return <div style={{textAlign:"center",color:"#aaa",padding:"40px"}}>Loading…</div>;
+  const sh=shareReport(buildText(),"COO Chop Money Report");
+  return(
+    <div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px",margin:"12px 0"}}>
+        {[{l:"Grand Total",v:`GH₵${grandTotal}`,c:C.gold},
+          {l:"Pending",v:pending.length,c:C.warn}].map((s,i)=>(
+          <Card key={i} style={{marginBottom:0,textAlign:"center",
+            borderTop:`3px solid ${s.c}`}}>
+            <div style={{fontSize:"1.3rem",fontWeight:800,color:s.c}}>{s.v}</div>
+            <div style={{fontSize:"0.68rem",color:"#888",textTransform:"uppercase"}}>{s.l}</div>
+          </Card>
+        ))}
+      </div>
+      {chops.map((c,i)=>(
+        <Card key={i} style={{marginBottom:"8px",
+          borderLeft:`4px solid ${c.status==="paid"?C.ok:C.warn}`}}>
+          <div style={{display:"flex",justifyContent:"space-between",
+            alignItems:"center",marginBottom:"6px"}}>
+            <div>
+              <div style={{fontWeight:800,color:C.forest}}>{c.dept}</div>
+              <div style={{fontSize:"0.72rem",color:"#888"}}>
+                {c.weekStart} → {c.weekEnd}</div>
+            </div>
+            <div style={{textAlign:"right"}}>
+              <div style={{fontWeight:800,color:C.gold,fontSize:"1rem"}}>
+                GH₵{c.totalAmount||0}</div>
+              <Badge color={c.status==="paid"?C.ok:C.warn}>
+                {(c.status||"pending").toUpperCase()}</Badge>
+            </div>
+          </div>
+          {(c.chopList||[]).map((w,j)=>(
+            <div key={j} style={{display:"flex",justifyContent:"space-between",
+              padding:"3px 0",borderTop:`1px dashed ${C.border}`,
+              fontSize:"0.75rem"}}>
+              <span style={{color:C.forest}}>{w.name}</span>
+              <span style={{color:"#888"}}>{w.days} days</span>
+              <span style={{color:C.gold,fontWeight:700}}>GH₵{w.amount}</span>
+            </div>
+          ))}
+        </Card>
+      ))}
+      {!chops.length&&<div style={{textAlign:"center",color:"#aaa",padding:"30px"}}>No chop money records yet.</div>}
+      <ShareCard sh={sh} title="Chop Money Report" sigName={sigName}/>
+    </div>
+  );
+}
+
+// ── COO: HR Reports Received ──────────────────────────────────────────────────
+function COOHRReport({user,sigName,letterhead,shareReport}){
+  const [reports,setReports]=useState([]);
+  const [detail,setDetail]=useState(null);
+  const [loading,setLoading]=useState(true);
+  useEffect(()=>{
+    getDocs(collection(db,"hrReports"))
+      .then(s=>{
+        const all=s.docs.map(d=>({id:d.id,...d.data()}));
+        all.sort((a,b)=>(b.sentAt?.seconds||0)-(a.sentAt?.seconds||0));
+        setReports(all); setLoading(false);
+      }).catch(()=>setLoading(false));
+  },[]);
+
+  const buildText=()=>{
+    let t=letterhead("COO HR REPORTS SUMMARY");
+    t+=`\nTotal Reports Received: ${reports.length}\n\n`;
+    reports.forEach((r,i)=>{
+      t+=`${i+1}. ${(r.type||"").toUpperCase()} — ${r.month}\n`;
+      t+=`   Sent by: ${r.sentBy||"HR"} via ${r.method||"in-app"}\n`;
+      if(r.text) t+=`\n${r.text}\n\n${"─".repeat(40)}\n\n`;
+    });
+    return t;
+  };
+
+  if(loading) return <div style={{textAlign:"center",color:"#aaa",padding:"40px"}}>Loading…</div>;
+  const sh=shareReport(buildText(),"COO HR Reports Summary");
+  return(
+    <div>
+      {!reports.length&&(
+        <div style={{textAlign:"center",color:"#aaa",padding:"30px"}}>
+          No HR reports received yet.<br/>
+          <span style={{fontSize:"0.78rem"}}>HR sends reports via the 📤 Report tab.</span>
+        </div>
+      )}
+      {reports.map((r,i)=>(
+        <Card key={i} style={{marginBottom:"8px",cursor:"pointer",
+          borderLeft:`4px solid ${C.blue}`}}
+          onClick={()=>setDetail(r)}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <div style={{fontWeight:800,color:C.forest,textTransform:"capitalize"}}>
+                {r.type||"Report"} Report</div>
+              <div style={{fontSize:"0.72rem",color:"#888"}}>
+                {r.month} · by {r.sentBy||"HR"} · via {r.method||"in-app"}</div>
+            </div>
+            <div style={{fontSize:"0.78rem",color:C.blue,fontWeight:700}}>View →</div>
+          </div>
+        </Card>
+      ))}
+      {detail&&(
+        <Modal title="📨 HR Report" onClose={()=>setDetail(null)}>
+          <div style={{fontWeight:800,color:C.forest,marginBottom:"4px",textTransform:"capitalize"}}>
+            {detail.type} Report — {detail.month}</div>
+          <div style={{fontSize:"0.72rem",color:"#888",marginBottom:"10px"}}>
+            Sent by {detail.sentBy}</div>
+          <div style={{background:C.mist,padding:"12px",borderRadius:"8px",
+            fontSize:"0.78rem",whiteSpace:"pre-wrap",fontFamily:"monospace",
+            maxHeight:"300px",overflowY:"auto",color:C.forest}}>
+            {detail.text||"No content"}
+          </div>
+        </Modal>
+      )}
+      <ShareCard sh={sh} title="HR Reports Summary" sigName={sigName}/>
+    </div>
+  );
+}
+
+// ── Shared Share Card component ───────────────────────────────────────────────
+function ShareCard({sh,title,sigName}){
+  return(
+    <Card style={{marginTop:"14px",border:`1px solid ${C.border}`}}>
+      <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"10px"}}>
+        <img src="/icon192.png" alt="KKTR" style={{width:"28px",height:"28px",
+          borderRadius:"6px",objectFit:"cover"}}
+          onError={e=>e.target.style.display="none"}/>
+        <div>
+          <div style={{fontWeight:800,color:C.forest,fontSize:"0.85rem"}}>
+            📤 Share {title}</div>
+          <div style={{fontSize:"0.65rem",color:"#aaa"}}>Signed: {sigName}</div>
+        </div>
+      </div>
+      <div style={{display:"flex",gap:"8px"}}>
+        <Btn onClick={sh.whatsapp} color="#25D366"
+          style={{flex:1,justifyContent:"center"}}>📱 WhatsApp</Btn>
+        <Btn onClick={sh.email} color={C.timber}
+          style={{flex:1,justifyContent:"center"}}>✉ Email</Btn>
+        <Btn onClick={sh.copy} color={C.sage}
+          style={{flex:1,justifyContent:"center"}}>📋 Copy</Btn>
+      </div>
+    </Card>
+  );
+}
+
 function AIModule({user}){
   const [msgs,setMsgs]=useState([{role:"assistant",text:
     "Hello! I'm your KKTR AI assistant.\nAsk about stock, restock alerts, or pending requisitions."}]);
@@ -3322,16 +3870,49 @@ function SettingsModule({user,onLogout,onInstall}){
         const s=await getDocs(collection(db,col));
         for(const d of s.docs) await deleteDoc(doc(db,col,d.id));
       }
-      // Clear chat subcollections per department
+      // Clear chat threads — new format: {dept}_{role}
       for(const dept of DEPTS){
-        try {
-          const msgs=await getDocs(collection(db,"chats",dept,"messages"));
-          for(const d of msgs.docs) await deleteDoc(d.ref);
-        } catch(e2){}
+        for(const role of STAFF_ROLES){
+          try {
+            const tid=threadKey(dept,role);
+            const msgs=await getDocs(collection(db,"chats",tid,"messages"));
+            for(const d of msgs.docs) await deleteDoc(d.ref);
+          } catch(e2){}
+        }
       }
+      // Clear stale chat caches
+      localStorage.removeItem("kktr_unread");
+      localStorage.removeItem("kktr_chat_cache");
+      localStorage.removeItem("kktr_threads");
+      localStorage.removeItem("kktr_offline_chat_queue");
+      localStorage.removeItem("kktr_stock_queue");
+      if(window.indexedDB){ indexedDB.deleteDatabase("kktr-offline-db"); }
       showToast("✅ Factory reset complete.");
       setFactoryPwd("");
     } catch(e){ showToast("Failed: "+e.message,"danger"); }
+    setLoading(false);
+  };
+
+  const clearChats = async () => {
+    if(!window.confirm("Delete all chat messages from all departments?")) return;
+    setLoading(true);
+    try {
+      for (const dept of DEPTS) {
+        for (const role of STAFF_ROLES) {
+          try {
+            const msgs = await getDocs(
+              collection(db, "chats", threadKey(dept, role), "messages")
+            );
+            for (const d of msgs.docs) {
+              await deleteDoc(d.ref);
+            }
+          } catch(e2){}
+        }
+      }
+      showToast("✅ All chats cleared!");
+    } catch(e){
+      showToast("Failed: " + e.message, "danger");
+    }
     setLoading(false);
   };
 
@@ -3595,18 +4176,7 @@ function SettingsModule({user,onLogout,onInstall}){
             <div style={{fontSize:"0.82rem",color:"#888",marginBottom:"12px"}}>
               Deletes all messages from all department chats. Fixes stale unread counts.
               Cannot be undone.</div>
-            <Btn onClick={async()=>{
-              if(!window.confirm("Delete all chat messages from all departments?")) return;
-              setLoading(true);
-              try {
-                for(const dept of DEPTS){
-                  const msgs=await getDocs(collection(db,"chats",dept,"messages"));
-                  for(const d of msgs.docs) await deleteDoc(d.ref);
-                }
-                showToast("✅ All chats cleared!");
-              } catch(e){ showToast("Failed: "+e.message,"danger"); }
-              setLoading(false);
-            }} loading={loading} color={C.warn}
+            <Btn onClick={clearChats} loading={loading} color={C.warn}
               style={{width:"100%",justifyContent:"center"}}>
               🗑 Clear All Chats</Btn>
           </Card>
@@ -3629,9 +4199,9 @@ function SettingsModule({user,onLogout,onInstall}){
         <div style={{fontWeight:800,color:C.cream,fontSize:"1rem"}}>
           Kete Krachi Timber Recovery</div>
         <div style={{fontSize:"0.75rem",color:"rgba(245,237,214,0.7)",marginTop:"4px"}}>
-          Store Management System v9.1</div>
+          Store Management System v9.5</div>
         <div style={{fontSize:"0.7rem",color:"rgba(245,237,214,0.4)"}}>
-          Built by Anaase-Tech Ltd · {new Date().getFullYear()} · Offline-First + HR Reports + Auto-Sync</div>
+          Built by Anaase-Tech Ltd · {new Date().getFullYear()} · Offline-First </div>
       </Card>
     </div>
   );
@@ -3913,7 +4483,9 @@ function AppInner(){
         {tab==="attendance"&&<AttendanceModule user={user}/>}
         {tab==="hr"&&<HRModule user={user}/>}
         {tab==="receipts"&&<ReceiptsModule user={user}/>}
-        {tab==="reports"&&<ReportsModule user={user}/>}
+        {tab==="reports"&&(isCOO
+          ?<COOReportsModule user={user}/>
+          :<ReportsModule user={user}/>)}
         {tab==="chat"&&<ChatModule user={user}/>}
         {tab==="ai"&&<AIModule user={user}/>}
         {tab==="settings"&&<SettingsModule user={user} onLogout={logout}
