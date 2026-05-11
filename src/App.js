@@ -22,6 +22,19 @@ const firebaseConfig = {
 
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
 
+// ─── PUSH NOTIFICATION FOUNDATION v9.6 ───────────────────────────────────────
+async function requestPushPermission(){
+  try{
+    if(!("Notification" in window)) return;
+    const permission=await Notification.requestPermission();
+    if(permission==="granted"){
+      console.log("Push permission granted");
+    }
+  }catch(e){
+    console.log("Push permission error:",e);
+  }
+}
+
 // ─── OFFLINE-FIRST FIRESTORE (v9.2 — Firebase v9 compatible) ─────────────────
 // enableIndexedDbPersistence works in Firebase v9 modular SDK
 // Must be called immediately after getFirestore, before any reads/writes
@@ -37,6 +50,67 @@ enableIndexedDbPersistence(db).catch(err => {
 });
 const rtdb = getDatabase(app);
 const storage = getStorage(app);
+
+// ─── IN-APP REPORT SYSTEM v9.6 ────────────────────────────────────────────────
+async function sendInAppReport({
+  type="general",
+  title="Report",
+  body="",
+  fromUser=null,
+  toRole="coo",
+  dept="",
+  pdfUrl=null
+}){
+  try{
+    await addDoc(collection(db,"reports"),{
+      type,
+      title,
+      body,
+      dept,
+      from:fromUser?.name||fromUser?.username||"Unknown",
+      fromRole:fromUser?.role||"",
+      toRole,
+      pdfUrl:pdfUrl||null,
+      status:"submitted",
+      createdAt:serverTimestamp()
+    });
+    // Notification to COO
+    await addDoc(collection(db,"notifications"),{
+      type:"report",
+      title:"📊 New Report",
+      message:title,
+      toRole,
+      read:false,
+      createdAt:serverTimestamp()
+    });
+  }catch(e){
+    console.log("Report error:",e);
+  }
+}
+
+// ─── PDF EXPORT v9.6 ─────────────────────────────────────────────────────────
+function exportPDF(title,content){
+  const win=window.open("","_blank");
+  if(!win) return;
+  win.document.write(`
+    <html>
+    <head>
+      <title>${title}</title>
+      <style>
+        body{ font-family:Arial; padding:24px; line-height:1.6; }
+        h1{ color:#1a2e1a; }
+        pre{ white-space:pre-wrap; font-size:14px; }
+      </style>
+    </head>
+    <body>
+      <h1>${title}</h1>
+      <pre>${content}</pre>
+    </body>
+    </html>
+  `);
+  win.document.close();
+  setTimeout(()=>{ win.print(); },700);
+}
 
 // ─── OFFLINE QUEUE ENGINE ─────────────────────────────────────────────────────
 const OQ_KEY = "kktr_offlineQueue";
@@ -90,8 +164,9 @@ async function syncOfflineChats() {
   } catch(e) {}
 }
 
-// ─── OFFLINE STOCK QUEUE ──────────────────────────────────────────────────────
+// ─── OFFLINE STOCK QUEUE v9.6 ────────────────────────────────────────────────
 const OFFLINE_STOCK_KEY = "kktr_stock_queue";
+const STOCK_QUEUE_KEY   = "kktr_stock_queue_v96";
 
 function queueOfflineStock(payload) {
   try {
@@ -101,17 +176,35 @@ function queueOfflineStock(payload) {
   } catch(e) {}
 }
 
+function queueStockOperation(op){
+  try{
+    const q=JSON.parse(localStorage.getItem(STOCK_QUEUE_KEY)||"[]");
+    q.push({...op, queuedAt:Date.now()});
+    localStorage.setItem(STOCK_QUEUE_KEY,JSON.stringify(q));
+  }catch(e){}
+}
+
 async function syncOfflineStock() {
   try {
+    if(!navigator.onLine) return;
+    // Sync storeItems queue
     const q = JSON.parse(localStorage.getItem(OFFLINE_STOCK_KEY) || "[]");
-    if (!q.length) return;
-    for (const item of q) {
-      try {
-        await addDoc(collection(db, "storeItems"), item.payload);
-      } catch(e) {}
+    if (q.length) {
+      for (const item of q) {
+        try { await addDoc(collection(db, "storeItems"), item.payload); } catch(e) {}
+      }
+      localStorage.removeItem(OFFLINE_STOCK_KEY);
     }
-    localStorage.removeItem(OFFLINE_STOCK_KEY);
-  } catch(e) {}
+    // Sync transactions queue (v9.6)
+    const q2=JSON.parse(localStorage.getItem(STOCK_QUEUE_KEY)||"[]");
+    if(q2.length){
+      for(const item of q2){
+        try { await addDoc(collection(db,"transactions"),item); } catch(e) {}
+      }
+      localStorage.removeItem(STOCK_QUEUE_KEY);
+      console.log("Stock queue synced");
+    }
+  } catch(e) { console.log("syncOfflineStock error:",e); }
 }
 
 // Auto-sync when network returns
@@ -2072,6 +2165,13 @@ function ChatThread({threadId,label,user,myRole,onBack}){
 
   const send=async()=>{
     if(!input.trim()) return;
+
+    // BLOCK department-to-department direct chat
+    const targetRole=threadId.split("_")[1]||"";
+    if(user?.role==="dept" && !["admin","hr","coo"].includes(targetRole)){
+      return;
+    }
+
     const text=input.trim();
     setInput("");
     const payload={
@@ -2621,12 +2721,17 @@ function StaffRoster({user}){
   },[]);
   const add=async(f)=>{
     if(!f.name||!f.dept) return showToast("Name and dept required","warn");
-    // Prevent duplicate worker names
+    // Prevent duplicate workers — normalized nameKey check
+    const normalizedName=(f.name||"").trim().toLowerCase();
     const existing=await getDocs(query(collection(db,"workers"),
-      where("name","==",f.name.trim()),where("dept","==",f.dept)));
-    if(!existing.empty) return showToast(`${f.name} already exists in ${f.dept}!`,"danger");
+      where("nameKey","==",normalizedName)));
+    if(!existing.empty){
+      showToast("Worker already exists","danger");
+      return;
+    }
     try {
       await addDoc(collection(db,"workers"),{
+        nameKey:normalizedName,
         name:f.name.trim(),dept:f.dept,type:f.type||"casual",
         staffId:f.staffId||"",addedBy:user?.name||user?.username||"Unknown",
         createdAt:serverTimestamp()
@@ -3198,6 +3303,8 @@ function ReportsModule({user}){
             color={C.timber} style={{flex:1,justifyContent:"center"}}>✉ Email</Btn>
           <Btn onClick={()=>share("copy",buildStoresReport)}
             color={C.sage} style={{flex:1,justifyContent:"center"}}>📋 Copy</Btn>
+          <Btn onClick={()=>exportPDF("KKTR Stores Report",buildStoresReport())}
+            color={C.danger} style={{flex:1,justifyContent:"center"}}>🖨 PDF</Btn>
         </div>
         <Btn onClick={submitToCOO} loading={submitting} color={C.forest}
           style={{width:"100%",justifyContent:"center",marginTop:"10px"}}>
@@ -3227,6 +3334,7 @@ function COOReportsModule({user}){
     const full=text+`\n${"═".repeat(40)}\nSigned: ${sigName}\n${sigTitle}\nKete Krachi Timber Recovery\n${"═".repeat(40)}`;
     const encoded=encodeURIComponent(full);
     return{
+      text:full,
       whatsapp:()=>window.open(`https://wa.me/?text=${encoded}`,"_blank"),
       email:()=>window.open(`mailto:?subject=${encodeURIComponent(subject)}&body=${encoded}`,"_blank"),
       copy:()=>navigator.clipboard?.writeText(full).then(()=>alert("Report copied!"))
@@ -3357,7 +3465,17 @@ function COOAttendReport({user,sigName,letterhead,shareReport}){
   };
 
   if(loading) return <div style={{textAlign:"center",color:"#aaa",padding:"40px"}}>Loading…</div>;
-  const sh=shareReport(buildText(),"COO Attendance Report");
+  const reportText=buildText();
+  const sh=shareReport(reportText,"COO Attendance Report");
+  // Also send in-app to COO dashboard
+  sendInAppReport({
+    type:"attendance",
+    title:"COO Attendance Report",
+    body:reportText,
+    fromUser:user,
+    toRole:"coo",
+    dept:user?.dept||""
+  });
   return(
     <div>
       {DEPTS.map(dept=>{
@@ -3586,13 +3704,15 @@ function ShareCard({sh,title,sigName}){
           <div style={{fontSize:"0.65rem",color:"#aaa"}}>Signed: {sigName}</div>
         </div>
       </div>
-      <div style={{display:"flex",gap:"8px"}}>
+      <div style={{display:"flex",gap:"8px",flexWrap:"wrap"}}>
         <Btn onClick={sh.whatsapp} color="#25D366"
           style={{flex:1,justifyContent:"center"}}>📱 WhatsApp</Btn>
         <Btn onClick={sh.email} color={C.timber}
           style={{flex:1,justifyContent:"center"}}>✉ Email</Btn>
         <Btn onClick={sh.copy} color={C.sage}
           style={{flex:1,justifyContent:"center"}}>📋 Copy</Btn>
+        <Btn onClick={()=>exportPDF(title,sh.text||"")} color={C.danger}
+          style={{flex:1,justifyContent:"center"}}>🖨 PDF</Btn>
       </div>
     </Card>
   );
@@ -3955,12 +4075,15 @@ function SettingsModule({user,onLogout,onInstall}){
         }
       }
       showToast("✅ Factory reset complete.");
-      // Clear all stale local caches
+      // Clear all stale local caches — v9.6 full cleanup
       localStorage.removeItem("kktr_unread");
       localStorage.removeItem("kktr_chat_cache");
       localStorage.removeItem("kktr_threads");
       localStorage.removeItem(OFFLINE_CHAT_KEY);
       localStorage.removeItem(OFFLINE_STOCK_KEY);
+      localStorage.removeItem("kktr_stock_queue_v96");
+      localStorage.removeItem("kktr_offline_attendance");
+      localStorage.removeItem("kktr_pending_sync");
       if (window.indexedDB) {
         try { indexedDB.deleteDatabase("kktr-offline-db"); } catch(e2) {}
       }
@@ -4269,9 +4392,9 @@ function SettingsModule({user,onLogout,onInstall}){
         <div style={{fontWeight:800,color:C.cream,fontSize:"1rem"}}>
           Kete Krachi Timber Recovery</div>
         <div style={{fontSize:"0.75rem",color:"rgba(245,237,214,0.7)",marginTop:"4px"}}>
-          Store Management System v9.5</div>
+          Store Management System v9.6</div>
         <div style={{fontSize:"0.7rem",color:"rgba(245,237,214,0.4)"}}>
-          Built by Anaase-Tech Ltd · {new Date().getFullYear()} · Offline-First + HR Reports + Auto-Sync</div>
+          Built by Anaase-Tech Ltd · {new Date().getFullYear()} · Offline-First </div>
       </Card>
     </div>
   );
