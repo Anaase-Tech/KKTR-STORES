@@ -26,6 +26,16 @@ const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0
 async function requestPushPermission(){
   try{
     if(!("Notification" in window)) return;
+    const permission = await Notification.requestPermission();
+    if(permission === "granted") console.log("Push permission granted");
+  }catch(e){ console.log("Push permission error:", e); }
+}
+
+
+// ─── PUSH NOTIFICATION FOUNDATION v9.6 ───────────────────────────────────────
+async function requestPushPermission(){
+  try{
+    if(!("Notification" in window)) return;
     const permission=await Notification.requestPermission();
     if(permission==="granted"){
       console.log("Push permission granted");
@@ -952,7 +962,7 @@ function COODashboard({user,onNav}){
     const uC=onSnapshot(query(collection(db,"chopMoney"),
       where("status","==","pending")),
       s=>setP(x=>({...x,chop:s.size})));
-    const uH=onSnapshot(collection(db,"hrReports"),
+    const uH=onSnapshot(query(collection(db,"reports"),where("toRole","==","coo")),
       s=>setP(x=>({...x,hrReports:s.size})));
     return()=>{uR();uA();uC();uH();};
   },[]);
@@ -1966,7 +1976,11 @@ function ReceiptForm({onSave,loading}){
 const STAFF_ROLES=["admin","hr","coo"]; // roles that can initiate threads
 
 // Thread key helper
-const threadKey=(dept,role)=>`${dept}_${role}`;
+// Use "||" separator — safe for dept names containing spaces (e.g. "Log Yard")
+const threadKey=(dept,role)=>`${[String(dept||"").trim(),String(role||"").trim()].sort().join("||")}`;
+const threadDept=(threadId)=>threadId.split("||").find(p=>DEPTS.includes(p))||threadId.split("||")[0];
+const threadRole=(threadId)=>threadId.split("||").find(p=>STAFF_ROLES.includes(p))||threadId.split("||")[1];
+
 
 // Role display names
 const roleLabel={admin:"Stores Admin",hr:"HR",coo:"COO"};
@@ -2021,7 +2035,7 @@ function StaffChatList({user,onSelect}){
         <Badge color={C.blue}>{roleLabel[role]||role}</Badge>
       </div>
       {DEPTS.map(dept=>{
-        const msgs=(threads[dept]||[]).slice().reverse();
+        const msgs=threads[dept]||[];
         const unread=msgs.filter(m=>m.from===dept&&!m.read).length;
         const last=msgs[msgs.length-1];
         return(
@@ -2140,7 +2154,7 @@ function ChatThread({threadId,label,user,myRole,onBack}){
   });
   const [input,setInput]=useState("");
   const bottomRef=useRef(null);
-  const dept=threadId.split("_")[0]; // extract dept from threadId
+  const dept=threadDept(threadId); // extract dept safely from threadId
 
   useEffect(()=>{
     const unsub=onSnapshot(
@@ -2167,8 +2181,9 @@ function ChatThread({threadId,label,user,myRole,onBack}){
     if(!input.trim()) return;
 
     // BLOCK department-to-department direct chat
-    const targetRole=threadId.split("_")[1]||"";
+    const targetRole=threadRole(threadId)||"";
     if(user?.role==="dept" && !["admin","hr","coo"].includes(targetRole)){
+      showToast&&showToast("Departments cannot message each other directly","danger");
       return;
     }
 
@@ -2563,13 +2578,19 @@ function HRReportSender({user}){
         :await buildChopText();
       if(!text){ showToast("No data for "+month,"warn"); setLoading(false); return; }
 
-      // Always save to Firestore so COO can see in-app
+      // Save to unified reports collection so COO sees in-app
       try {
-        await addDoc(collection(db,"hrReports"),{
-          type:reportType,month,text,
-          sentBy:user?.name||"HR",sentAt:serverTimestamp(),method
+        await sendInAppReport({
+          type:reportType,
+          title:`${reportType==="attendance"?"Attendance":"Chop Money"} Report — ${month}`,
+          body:text,
+          fromUser:user,
+          toRole:"coo",
+          dept:"HR"
         });
-      } catch(e){ queueOffline("hrReports",{type:reportType,month,text,sentBy:user?.name||"HR",method}); }
+      } catch(e){ queueOffline("reports",{type:reportType,
+        title:`HR ${reportType} Report`,body:text,
+        fromRole:"hr",toRole:"coo",dept:"HR",status:"submitted"}); }
 
       if(method==="whatsapp"){
         window.open(`https://wa.me/${COO_WHATSAPP}?text=${encodeURIComponent(text)}`,"_blank");
@@ -3465,17 +3486,32 @@ function COOAttendReport({user,sigName,letterhead,shareReport}){
   };
 
   if(loading) return <div style={{textAlign:"center",color:"#aaa",padding:"40px"}}>Loading…</div>;
-  const reportText=buildText();
-  const sh=shareReport(reportText,"COO Attendance Report");
-  // Also send in-app to COO dashboard
-  sendInAppReport({
-    type:"attendance",
-    title:"COO Attendance Report",
-    body:reportText,
-    fromUser:user,
-    toRole:"coo",
-    dept:user?.dept||""
-  });
+
+  const [attSubmitting,setAttSubmitting]=useState(false);
+
+  const handleShareAndSubmit=async(via)=>{
+    const reportText=buildText();
+    const sh=shareReport(reportText,"COO Attendance Report");
+    if(via==="whatsapp") sh.whatsapp();
+    else if(via==="email") sh.email();
+    else if(via==="copy") sh.copy();
+    else if(via==="pdf") exportPDF("COO Attendance Report", reportText);
+    else if(via==="coo"){
+      setAttSubmitting(true);
+      await sendInAppReport({
+        type:"attendance",
+        title:"COO Attendance Report — "+new Date().toLocaleDateString("en-GB"),
+        body:reportText,
+        fromUser:user,
+        toRole:"coo",
+        dept:user?.dept||""
+      });
+      setAttSubmitting(false);
+      alert("✅ Report submitted to COO!");
+    }
+  };
+
+  const sh=shareReport(buildText(),"COO Attendance Report");
   return(
     <div>
       {DEPTS.map(dept=>{
@@ -3516,7 +3552,23 @@ function COOAttendReport({user,sigName,letterhead,shareReport}){
         );
       })}
       {!reports.length&&<div style={{textAlign:"center",color:"#aaa",padding:"30px"}}>No attendance reports yet.</div>}
-      <ShareCard sh={sh} title="Attendance Report" sigName={sigName}/>
+      <Card style={{marginTop:"14px",border:`1px solid ${C.border}`}}>
+        <div style={{fontWeight:800,color:C.forest,marginBottom:"10px"}}>
+          📤 Share Attendance Report</div>
+        <div style={{display:"flex",gap:"8px",flexWrap:"wrap",marginBottom:"8px"}}>
+          <Btn onClick={()=>handleShareAndSubmit("whatsapp")} color="#25D366"
+            style={{flex:1,justifyContent:"center"}}>📱 WhatsApp</Btn>
+          <Btn onClick={()=>handleShareAndSubmit("email")} color={C.timber}
+            style={{flex:1,justifyContent:"center"}}>✉ Email</Btn>
+          <Btn onClick={()=>handleShareAndSubmit("copy")} color={C.sage}
+            style={{flex:1,justifyContent:"center"}}>📋 Copy</Btn>
+          <Btn onClick={()=>handleShareAndSubmit("pdf")} color={C.danger}
+            style={{flex:1,justifyContent:"center"}}>🖨 PDF</Btn>
+        </div>
+        <Btn onClick={()=>handleShareAndSubmit("coo")} loading={attSubmitting}
+          color={C.forest} style={{width:"100%",justifyContent:"center"}}>
+          📨 Submit to COO Dashboard</Btn>
+      </Card>
     </div>
   );
 }
@@ -3680,9 +3732,17 @@ function COOHRReport({user,sigName,letterhead,shareReport}){
             <div style={{background:C.panel,padding:"10px",borderRadius:"8px",
               fontSize:"0.72rem",whiteSpace:"pre-wrap",fontFamily:"monospace",
               maxHeight:"200px",overflowY:"auto",color:C.forest,marginTop:"10px"}}>
-              {detail.reportText}
+              {detail.body||detail.text||detail.reportText}
             </div>
           )}
+          <Btn onClick={()=>exportPDF(
+              detail.title||"KKTR Report",
+              detail.body||detail.text||detail.reportText||""
+            )}
+            color={C.danger}
+            style={{width:"100%",justifyContent:"center",marginTop:"10px"}}>
+            🖨 Export PDF
+          </Btn>
         </Modal>
       )}
       <ShareCard sh={sh} title="HR Reports Summary" sigName={sigName}/>
