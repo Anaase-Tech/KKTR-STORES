@@ -32,18 +32,6 @@ async function requestPushPermission(){
 }
 
 
-// ─── PUSH NOTIFICATION FOUNDATION v9.6 ───────────────────────────────────────
-async function requestPushPermission(){
-  try{
-    if(!("Notification" in window)) return;
-    const permission=await Notification.requestPermission();
-    if(permission==="granted"){
-      console.log("Push permission granted");
-    }
-  }catch(e){
-    console.log("Push permission error:",e);
-  }
-}
 
 // ─── OFFLINE-FIRST FIRESTORE (v9.2 — Firebase v9 compatible) ─────────────────
 // enableIndexedDbPersistence works in Firebase v9 modular SDK
