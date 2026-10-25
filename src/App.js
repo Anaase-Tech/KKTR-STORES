@@ -1503,7 +1503,7 @@ function StoresModule({user}){
           };
           if(!navigator.onLine){
             queueOfflineStock(payload);
-            showToast("✅ Saved offline — syncs on reconnect","warn");
+            showToast("Item queued on this device. It will become available after the connection returns and synchronization succeeds.","warn");
             setModal(null);
             return;
           }
