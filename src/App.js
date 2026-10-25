@@ -46,38 +46,19 @@ async function sendInAppReport({
   type="general",
   title="Report",
   body="",
-  fromUser=null,
-  toRole="coo",
   dept="",
   period="",
-  pdfUrl=null
+  summary={}
 }){
-  const from=fromUser?.name||fromUser?.username||"";
-  const fromRole=fromUser?.role||"";
-  const reportRef=doc(collection(db,"reports"));
-  const notificationRef=doc(collection(db,"notifications"));
-  await runTransaction(db,async(transaction)=>{
-    transaction.set(reportRef,{
-      type,title,body,dept,from,fromRole,
-      submittedBy:from,
-      fromDept:dept,
-      period,
-      toRole,
-      targetRole:toRole,
-      pdfUrl:pdfUrl||null,
-      status:"submitted",
-      createdAt:serverTimestamp()
-    });
-    transaction.set(notificationRef,{
-      type:"report",
-      title:"New Report",
-      message:title,
-      toRole,
-      targetRole:toRole,
-      read:false,
-      createdAt:serverTimestamp()
-    });
+  // Identity, recipient routing, and notification fan-out are server-authoritative.
+  const response=await callBackend("submitReportToCOO",{
+    type,title,body,dept,period,summary
   });
+  const result=response?.data;
+  if(!result?.ok||!result?.reportId){
+    throw new Error("The report service did not confirm that the report was saved.");
+  }
+  return result;
 }
 
 // ─── PDF EXPORT v9.6 ─────────────────────────────────────────────────────────
