@@ -3608,16 +3608,22 @@ function COOAttendReport({user,sigName,letterhead,shareReport}){
     else if(via==="pdf") exportPDF("COO Attendance Report", reportText);
     else if(via==="coo"){
       setAttSubmitting(true);
-      await sendInAppReport({
-        type:"attendance",
-        title:"COO Attendance Report — "+new Date().toLocaleDateString("en-GB"),
-        body:reportText,
-        fromUser:user,
-        toRole:"coo",
-        dept:user?.dept||""
-      });
-      setAttSubmitting(false);
-      alert("✅ Report submitted to COO!");
+      try {
+        const result=await sendInAppReport({
+          type:"attendance",
+          title:"COO Attendance Report — "+new Date().toLocaleDateString("en-GB"),
+          body:reportText,
+          dept:"Administration",
+          period:new Date().toISOString().slice(0,10)
+        });
+        alert(result.notificationRecipients>0
+          ?`Attendance summary saved to COO inbox; ${result.notificationRecipients} active COO account(s) notified.`
+          :"Attendance summary saved to COO inbox, but no active approved COO account could be notified.");
+      } catch(error) {
+        alert("Attendance summary submission failed: "+(error?.message||"Unknown error"));
+      } finally {
+        setAttSubmitting(false);
+      }
     }
   };
 
