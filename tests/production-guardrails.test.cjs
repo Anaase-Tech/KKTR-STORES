@@ -70,6 +70,21 @@ test("report creation uses a trusted server callable and private recipient fan-o
   assert.match(rules, /resource\.data\.keys\(\)\.hasAny\(\['toUserId'\]\)/);
 });
 
+test("attendance, chop-money, and Stores reports derive operational values from Firebase records", () => {
+  const functionsSource = fs.readFileSync(path.join(root, "functions/index.js"), "utf8");
+  assert.match(functionsSource, /db\.collection\("attendanceReports"\)[\s\S]{0,100}where\("status", "==", "approved"\)/);
+  assert.match(functionsSource, /db\.collection\("chopMoney"\)\.get\(\)/);
+  assert.match(functionsSource, /db\.collection\("transactions"\)\.get\(\)/);
+  assert.match(functionsSource, /db\.collection\("receipts"\)\.get\(\)/);
+  assert.match(functionsSource, /const range = data\.range \|\| \{\}/);
+  assert.match(app, /range:\{from:f2,to:t2\}/);
+  const storesStart = app.indexOf("const submitToCOO=async()=>");
+  const storesEnd = app.indexOf("if(loading) return", storesStart);
+  const storesSubmit = app.slice(storesStart, storesEnd);
+  assert.doesNotMatch(storesSubmit, /summary:/);
+  assert.doesNotMatch(storesSubmit, /body:buildStoresReport\(\)/);
+});
+
 test("HR attendance approval and COO filing are atomic and safely retryable", () => {
   const functionsSource = fs.readFileSync(path.join(root, "functions/index.js"), "utf8");
   assert.match(app, /callBackend\("approveAttendanceReportAndSendToCOO"/);
