@@ -590,53 +590,282 @@ exports.submitReportToCOO = onCall({ maxInstances: 5 }, async request => {
 
   const data = request.data || {};
   const type = cleanText(data.type, 30);
-  const rawTitle = typeof data.title === "string" ? data.title.trim() : "";
-  const title = rawTitle;
-  const body = data.body === undefined || data.body === null
-    ? "" : (typeof data.body === "string" ? data.body : null);
-  if (body === null) fail("invalid-argument", "The report body must be text.");
-  const rawPeriod = data.period === undefined || data.period === null
+  const title = typeof data.title === "string" ? data.title.trim() : "";
+  if (!["general", "attendance", "chop", "stores"].includes(type)) {
+    fail("invalid-argument", "The report type is not supported.");
+  }
+  if (!title || title.length > 180) {
+    fail("invalid-argument", "A report title of 1–180 characters is required.");
+  }
+
+  const periodValue = data.period === undefined || data.period === null
     ? "" : (typeof data.period === "string" ? data.period.trim() : null);
-  if (rawPeriod === null) fail("invalid-argument", "The report period must be text.");
-  const period = rawPeriod;
-  const rawDept = data.dept === undefined || data.dept === null
+  if (periodValue === null || periodValue.length > 100) {
+    fail("invalid-argument", "The report period must be text of at most 100 characters.");
+  }
+  const deptValue = data.dept === undefined || data.dept === null
     ? "" : (typeof data.dept === "string" ? data.dept.trim() : null);
-  if (rawDept === null) fail("invalid-argument", "The report department must be text.");
-  if (rawDept.length > 100) fail("invalid-argument", "The report department must be 100 characters or fewer.");
-  const dept = rawDept ||
+  if (deptValue === null || deptValue.length > 100) {
+    fail("invalid-argument", "The report department must be text of at most 100 characters.");
+  }
+  const requestedBody = data.body === undefined || data.body === null
+    ? "" : (typeof data.body === "string" ? data.body : null);
+  if (requestedBody === null || requestedBody.length > 100000) {
+    fail("invalid-argument", "The report body must be text no longer than 100,000 characters.");
+  }
+
+  let finalPeriod = periodValue;
+  let finalDept = deptValue ||
     (profile.role === "hr" ? "HR" : profile.role === "coo" ? "Administration" : "Stores");
-  const allowedTypes = new Set(["general", "attendance", "chop", "stores"]);
-  if (!allowedTypes.has(type)) fail("invalid-argument", "The report type is not supported.");
-  if (!title || title.length > 180) fail("invalid-argument", "A report title of 1–180 characters is required.");
-  if (body.length > 100000) fail("invalid-argument", "Report body exceeds the 100,000-character limit.");
-  if (period.length > 100) fail("invalid-argument", "The report period must be 100 characters or fewer.");
-  if (!dept || dept.length > 100) fail("invalid-argument", "A valid report department is required.");
-
-  let summary = {};
-  if (data.summary !== undefined && data.summary !== null) {
-    if (typeof data.summary !== "object" || Array.isArray(data.summary)) {
-      fail("invalid-argument", "Report summary must be an object.");
+  let finalBody = requestedBody;
+  let finalSummary = {};
+  const now = new Date();
+  const dateKey = value => {
+    if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10);
+    try {
+      const date = value && typeof value.toDate === "function"
+        ? value.toDate()
+        : (value ? new Date(value) : null);
+      return date && Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : "";
+    } catch {
+      return "";
     }
-    summary = data.summary;
-  }
-  let summaryJson;
-  try {
-    summaryJson = JSON.stringify(summary);
-  } catch {
-    fail("invalid-argument", "Report summary is not valid JSON data.");
-  }
-  if (Buffer.byteLength(summaryJson || "{}", "utf8") > 20000) {
-    fail("invalid-argument", "Report summary exceeds the 20,000-byte limit.");
+  };
+  const periodMatches = value => /^\d{4}-(0[1-9]|1[0-2])$/.test(value);
+
+  if (type === "attendance") {
+    if (profile.role !== "hr" && profile.role !== "coo" && profile.role !== "admin") {
+      fail("permission-denied", "Attendance reports may only be filed by HR, Admin, or COO.");
+    }
+    if (profile.role === "hr" && !periodMatches(finalPeriod)) {
+      fail("invalid-argument", "HR attendance reports require a reporting month in YYYY-MM format.");
+    }
+    const approvedSnapshot = await db.collection("attendanceReports")
+      .where("status", "==", "approved").get();
+    const reports = approvedSnapshot.docs.map(docSnap => ({
+      id: docSnap.id,
+      ...docSnap.data()
+    })).filter(record => {
+      if (profile.role === "hr") {
+        return record.month === finalPeriod ||
+          (typeof record.monthStart === "string" && record.monthStart.startsWith(finalPeriod));
+      }
+      return true;
+    }).sort((a, b) => {
+      const aKey = String(a.month || a.monthStart || "");
+      const bKey = String(b.month || b.monthStart || "");
+      return aKey.localeCompare(bKey) || String(a.dept || "").localeCompare(String(b.dept || ""));
+    });
+    if (!reports.length) {
+      fail("not-found", profile.role === "hr"
+        ? "No HR-approved department attendance reports exist for the selected month."
+        : "No HR-approved attendance reports are available to file.");
+    }
+    const departmentLines = [];
+    let totalPresent = 0;
+    let totalAbsent = 0;
+    let totalChopMoney = 0;
+    let totalWorkers = 0;
+    for (const record of reports) {
+      const rows = Array.isArray(record.summary) ? record.summary : [];
+      const present = rows.reduce((total, row) => total + (Number(row && row.present) || 0), 0);
+      const absent = rows.reduce((total, row) => total + (Number(row && row.absent) || 0), 0);
+      const chop = rows.reduce((total, row) => total + (Number(row && row.chopMoney) || 0), 0);
+      totalPresent += present;
+      totalAbsent += absent;
+      totalChopMoney += chop;
+      totalWorkers += rows.length;
+      departmentLines.push(
+        String(record.dept || "Unknown department") + " — " +
+        String(record.month || record.monthStart || "Period not recorded") +
+        ": " + present + " present, " + absent + " absent, GH₵" + chop + " chop money"
+      );
+    }
+    if (profile.role === "hr") finalDept = "HR";
+    if (!finalPeriod || !periodMatches(finalPeriod)) finalPeriod = now.toISOString().slice(0, 10);
+    finalBody = [
+      "KKTR ATTENDANCE REPORT",
+      "Reporting period: " + finalPeriod,
+      "",
+      ...departmentLines,
+      "",
+      "TOTALS: " + totalPresent + " present | " + totalAbsent +
+        " absent | GH₵" + totalChopMoney + " chop money | " + totalWorkers + " worker-summary rows"
+    ].join("\n");
+    finalSummary = {
+      departments: reports.length,
+      totalPresent,
+      totalAbsent,
+      totalChopMoney,
+      workers: totalWorkers
+    };
+  } else if (type === "chop") {
+    if (profile.role !== "hr") {
+      fail("permission-denied", "Only HR can file the chop-money report.");
+    }
+    if (!periodMatches(finalPeriod)) {
+      fail("invalid-argument", "Chop-money reports require a reporting month in YYYY-MM format.");
+    }
+    const chopSnapshot = await db.collection("chopMoney").get();
+    const records = chopSnapshot.docs.map(docSnap => ({
+      id: docSnap.id,
+      ...docSnap.data()
+    })).filter(record => {
+      if (!["approved", "paid"].includes(record.status)) return false;
+      const date = dateKey(record.createdAt) || dateKey(record.weekStart);
+      return date.startsWith(finalPeriod);
+    }).sort((a, b) => String(a.dept || "").localeCompare(String(b.dept || "")) ||
+      String(a.weekStart || "").localeCompare(String(b.weekStart || "")));
+    if (!records.length) {
+      fail("not-found", "No HR-approved chop-money submissions exist for the selected month.");
+    }
+    let totalAmount = 0;
+    let totalDays = 0;
+    const lines = ["KKTR APPROVED CHOP-MONEY REPORT", "Reporting period: " + finalPeriod, ""];
+    for (const record of records) {
+      const amount = Number(record.totalAmount) || 0;
+      totalAmount += amount;
+      lines.push(String(record.dept || "Unknown department") + " — " +
+        String(record.weekStart || "?") + " to " + String(record.weekEnd || "?") +
+        " — " + String(record.status) + " — GH₵" + amount);
+      for (const worker of (Array.isArray(record.chopList) ? record.chopList : [])) {
+        totalDays += Number(worker && worker.days) || 0;
+        lines.push("  " + (cleanText(worker && worker.name, 100) || "Unnamed worker") +
+          ": " + (Number(worker && worker.days) || 0) + " approved days — GH₵" +
+          (Number(worker && worker.amount) || 0));
+      }
+    }
+    lines.push("", "SUBMISSIONS: " + records.length, "APPROVED DAYS: " + totalDays,
+      "TOTAL APPROVED CHOP MONEY: GH₵" + totalAmount);
+    finalDept = "HR";
+    finalBody = lines.join("\n");
+    finalSummary = { submissions: records.length, approvedDays: totalDays, totalAmount };
+  } else if (type === "stores") {
+    if (profile.role !== "admin" && profile.role !== "store_manager") {
+      fail("permission-denied", "Only Stores Admin or the Stores Manager can file the Stores report.");
+    }
+    const range = data.range || {};
+    const from = typeof range.from === "string" ? range.from : "";
+    const to = typeof range.to === "string" ? range.to : "";
+    const validDate = value => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+      const parsed = new Date(value + "T00:00:00Z");
+      return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+    };
+    if (!validDate(from) || !validDate(to) || from > to) {
+      fail("invalid-argument", "Stores reports require a valid start and end date.");
+    }
+    const [lubricantSnapshot, itemSnapshot, transactionSnapshot, requisitionSnapshot, receiptSnapshot] =
+      await Promise.all([
+        db.collection("lubricants").get(),
+        db.collection("storeItems").get(),
+        db.collection("transactions").get(),
+        db.collection("requisitions").get(),
+        db.collection("receipts").get()
+      ]);
+    const inRange = record => {
+      const key = dateKey(record.date) || dateKey(record.createdAt);
+      return Boolean(key && key >= from && key <= to);
+    };
+    const transactions = transactionSnapshot.docs.map(docSnap => ({
+      id: docSnap.id,
+      ...docSnap.data()
+    })).filter(record => inRange(record) && ["lube", "store"].includes(record.type));
+    const requisitions = requisitionSnapshot.docs.map(docSnap => docSnap.data()).filter(inRange);
+    const receipts = receiptSnapshot.docs.map(docSnap => docSnap.data()).filter(inRange);
+    const lubricants = lubricantSnapshot.docs.map(docSnap => docSnap.data());
+    const storeItems = itemSnapshot.docs.map(docSnap => docSnap.data());
+    const lubeIssued = transactions.filter(record => record.type === "lube" && record.action === "issue");
+    const lubeRestocked = transactions.filter(record => record.type === "lube" && record.action === "restock");
+    const itemsIssued = transactions.filter(record => record.type === "store" && record.action === "issue");
+    const itemsRestocked = transactions.filter(record => record.type === "store" && record.action === "restock");
+    const lowLubricants = lubricants.filter(item => (Number(item.currentStock) || 0) < (Number(item.minStock) || 0));
+    const lowItems = storeItems.filter(item => (Number(item.currentStock) || 0) < (Number(item.minStock) || 0));
+    const totalReceipts = receipts.reduce((total, record) => total + (Number(record.amount) || 0), 0);
+    const label = from + " to " + to;
+    const lowStockNames = [
+      ...lowLubricants.map(item => "Lubricant: " + cleanText(item.name, 100)),
+      ...lowItems.map(item => "Store item: " + cleanText(item.name, 100))
+    ];
+    const lines = [
+      "KETE KRACHI TIMBER RECOVERY — KKTR STORES SYSTEM",
+      "STORES REPORT: " + label,
+      "",
+      "LUBRICANTS",
+      "Issued transactions: " + lubeIssued.length + " | quantity: " +
+        lubeIssued.reduce((total, record) => total + (Number(record.qty) || 0), 0),
+      "Restock transactions: " + lubeRestocked.length + " | quantity: " +
+        lubeRestocked.reduce((total, record) => total + (Number(record.qty) || 0), 0),
+      "Current lubricant types: " + lubricants.length,
+      "",
+      "GENERAL STORES",
+      "Items issued: " + itemsIssued.length + " | quantity: " +
+        itemsIssued.reduce((total, record) => total + (Number(record.qty) || 0), 0),
+      "Restock transactions: " + itemsRestocked.length + " | quantity: " +
+        itemsRestocked.reduce((total, record) => total + (Number(record.qty) || 0), 0),
+      "Current store-item types: " + storeItems.length,
+      "",
+      "OPERATIONS",
+      "Requisitions in period: " + requisitions.length,
+      "Receipts in period: " + receipts.length,
+      "Total receipt amount in period: GH₵" + totalReceipts,
+      "Low-stock records: " + lowStockNames.length,
+      ...lowStockNames.slice(0, 100).map(name => "  " + name)
+    ];
+    if (lowStockNames.length > 100) {
+      lines.push("  (First 100 low-stock names shown; the total count above includes all low-stock records.)");
+    }
+    finalDept = "Stores";
+    finalPeriod = label;
+    finalBody = lines.join("\n");
+    finalSummary = {
+      periodStart: from,
+      periodEnd: to,
+      lubeIssueTransactions: lubeIssued.length,
+      lubeIssuedQuantity: lubeIssued.reduce((total, record) => total + (Number(record.qty) || 0), 0),
+      lubeRestockTransactions: lubeRestocked.length,
+      lubeRestockedQuantity: lubeRestocked.reduce((total, record) => total + (Number(record.qty) || 0), 0),
+      storeIssueTransactions: itemsIssued.length,
+      storeIssuedQuantity: itemsIssued.reduce((total, record) => total + (Number(record.qty) || 0), 0),
+      storeRestockTransactions: itemsRestocked.length,
+      storeRestockedQuantity: itemsRestocked.reduce((total, record) => total + (Number(record.qty) || 0), 0),
+      requisitions: requisitions.length,
+      receipts: receipts.length,
+      totalReceipts,
+      lowStockCount: lowStockNames.length,
+      lubricantTypes: lubricants.length,
+      storeItemTypes: storeItems.length
+    };
+  } else {
+    if (!requestedBody.trim()) {
+      fail("invalid-argument", "A general report requires non-empty body text.");
+    }
+    if (data.summary !== undefined && data.summary !== null) {
+      if (typeof data.summary !== "object" || Array.isArray(data.summary)) {
+        fail("invalid-argument", "Report summary must be an object.");
+      }
+      let summaryJson;
+      try {
+        summaryJson = JSON.stringify(data.summary);
+      } catch {
+        fail("invalid-argument", "Report summary is not valid JSON data.");
+      }
+      if (Buffer.byteLength(summaryJson || "{}", "utf8") > 20000) {
+        fail("invalid-argument", "Report summary exceeds the 20,000-byte limit.");
+      }
+      finalSummary = data.summary;
+    }
   }
 
+  if (finalBody.length > 100000) {
+    fail("resource-exhausted", "The generated report exceeds the 100,000-character limit.");
+  }
   // Never trust sender identity or recipient fields supplied by the browser.
   const cooSnapshot = await db.collection("users").where("role", "==", "coo").get();
   const recipients = cooSnapshot.docs.filter(docSnap => {
     const candidate = docSnap.data();
     return candidate.approved === true && candidate.disabled !== true;
   });
-  // A single Firestore transaction can write at most 500 documents. Fail visibly
-  // rather than saving a report while silently dropping recipient notifications.
   if (recipients.length > 400) {
     fail("resource-exhausted", "There are too many COO recipients to notify safely in one transaction.");
   }
@@ -650,19 +879,19 @@ exports.submitReportToCOO = onCall({ maxInstances: 5 }, async request => {
   const report = {
     type,
     title,
-    body,
-    reportText: body,
-    dept,
+    body: finalBody,
+    reportText: finalBody,
+    dept: finalDept,
     from: actorName,
     fromRole: profile.role,
     submittedBy: actorName,
     submittedByUid: uid,
-    fromDept: dept,
-    period,
+    fromDept: finalDept,
+    period: finalPeriod,
     toRole: "coo",
     targetRole: "coo",
     targetDept: "Administration",
-    summary,
+    summary: finalSummary,
     status: "submitted",
     createdByUid: uid,
     createdAt: FieldValue.serverTimestamp()
@@ -685,13 +914,8 @@ exports.submitReportToCOO = onCall({ maxInstances: 5 }, async request => {
     }
   });
 
-  return {
-    ok: true,
-    reportId: reportRef.id,
-    notificationRecipients: notificationRefs.length
-  };
+  return { ok: true, reportId: reportRef.id, notificationRecipients: notificationRefs.length };
 });
-
 
 exports.approveAttendanceReportAndSendToCOO = onCall({ maxInstances: 5 }, async request => {
   const { uid, profile } = await getCallerProfile(request);
