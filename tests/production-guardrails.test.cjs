@@ -178,3 +178,32 @@ test("factory reset cannot directly delete production records from the browser",
   assert.match(settings, /Factory reset is disabled/);
   assert.equal(settings.includes('"attendanceReports","attendance","passwordResets",'), false);
 });
+
+
+test("account administration uses the sanitized live directory, never raw profile-list reads", () => {
+  assert.match(app, /callBackend\("listAccounts",\{\}\)/);
+  assert.match(app, /collection\(db,"accountDirectory"\)/);
+  assert.doesNotMatch(app, /onSnapshot\(collection\(db,"users"\)/);
+});
+
+test("worker changes use HR-authorized callables with server-enforced normalized uniqueness", () => {
+  const functionsSource = fs.readFileSync(path.join(root, "functions/index.js"), "utf8");
+  const workerHelpers = fs.readFileSync(path.join(root, "functions/src/workers.js"), "utf8");
+  assert.match(app, /callBackend\("addWorker"/);
+  assert.match(app, /callBackend\("deleteWorker"/);
+  assert.match(functionsSource, /exports\.addWorker = onCall/);
+  assert.match(functionsSource, /exports\.deleteWorker = onCall/);
+  assert.match(functionsSource, /normalizeWorkerName\(item\.data\(\)\.name\) === worker\.nameKey/);
+  assert.match(workerHelpers, /normalizeWorkerName/);
+  assert.match(fs.readFileSync(path.join(root, "firestore.rules"), "utf8"), /match \/workerNameKeys\/\{id\}[\s\S]*?allow read, write: if false/);
+});
+
+test("security rule configuration explicitly protects Firestore and Storage", () => {
+  const config = JSON.parse(fs.readFileSync(path.join(root, "firebase.json"), "utf8"));
+  assert.equal(config.firestore.rules, "firestore.rules");
+  assert.equal(config.storage.rules, "storage.rules");
+  const rules = fs.readFileSync(path.join(root, "firestore.rules"), "utf8");
+  assert.match(rules, /match \/userCredentials\/\{id\} \{ allow read, write: if false; \}/);
+  assert.match(rules, /match \/transactions\/\{id\}[\s\S]*?allow update, delete: if false/);
+  assert.match(rules, /function pairedStockChange/);
+});
