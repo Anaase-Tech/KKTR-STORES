@@ -166,6 +166,52 @@ async function migrateLegacyCredential(uid, profile, credentialRef, password) {
   });
 }
 
+
+function directoryProfile(profile, username) {
+  return {
+    id: username,
+    username,
+    name: cleanText(profile && profile.name, 100) || username,
+    dept: cleanText(profile && profile.dept, 100),
+    role: ROLES.has(profile && profile.role) ? profile.role : "dept",
+    approved: profile && profile.approved === true,
+    disabled: profile && profile.disabled === true,
+    createdAt: profile && profile.createdAt ? profile.createdAt : null,
+    approvedAt: profile && profile.approvedAt ? profile.approvedAt : null,
+    roleChangedAt: profile && profile.roleChangedAt ? profile.roleChangedAt : null
+  };
+}
+
+async function syncAccountDirectory(username, profile) {
+  await db.collection("accountDirectory").doc(username).set({
+    ...directoryProfile(profile, username),
+    directoryUpdatedAt: FieldValue.serverTimestamp()
+  }, { merge: true });
+}
+
+async function refreshAccountDirectory() {
+  const snapshot = await db.collection("users").get();
+  // Keep each batch below Firestore's 500-write limit.
+  for (let offset = 0; offset < snapshot.docs.length; offset += 400) {
+    const batch = db.batch();
+    const chunk = snapshot.docs.slice(offset, offset + 400);
+    for (const account of chunk) {
+      batch.set(db.collection("accountDirectory").doc(account.id), {
+        ...directoryProfile(account.data(), account.id),
+        directoryUpdatedAt: FieldValue.serverTimestamp()
+      }, { merge: true });
+    }
+    if (chunk.length) await batch.commit();
+  }
+  return snapshot.docs.map(d => directoryProfile(d.data(), d.id));
+}
+
+exports.listAccounts = onCall({ maxInstances: 5 }, async request => {
+  await assertAdministrator(request);
+  const accounts = await refreshAccountDirectory();
+  return { accounts };
+});
+
 exports.authenticateUser = onCall({ maxInstances: 10 }, async request => {
   const username = normalizeUsername(request.data && request.data.username);
   const password = request.data && request.data.password;
@@ -204,6 +250,7 @@ exports.authenticateUser = onCall({ maxInstances: 10 }, async request => {
   }
 
   await ensureAuthUser(username, profile.name || username);
+  await syncAccountDirectory(username, profile);
   const token = await auth.createCustomToken(username, {
     role: profile.role,
     dept: cleanText(profile.dept, 100)
@@ -258,7 +305,12 @@ exports.registerDepartmentHead = onCall({ maxInstances: 5 }, async request => {
     created = true;
   });
 
-  if (created) await ensureAuthUser(username, name);
+  if (created) {
+    await ensureAuthUser(username, name);
+    await syncAccountDirectory(username, {
+      id: username, username, name, dept, role: "dept", approved: false
+    });
+  }
   return { ok: true, username, status: "pending-approval" };
 });
 
@@ -301,6 +353,7 @@ exports.approveDepartmentHead = onCall({ maxInstances: 5 }, async request => {
     approvedBy: actorUid,
     approvedAt: FieldValue.serverTimestamp()
   });
+  await syncAccountDirectory(targetId, (await targetRef.get()).data());
   return { ok: true, username: targetId, approved: true };
 });
 
@@ -329,6 +382,7 @@ exports.setAccountRole = onCall({ maxInstances: 5 }, async request => {
       roleChangedAt: FieldValue.serverTimestamp()
     });
   });
+  await syncAccountDirectory(targetId, (await targetRef.get()).data());
 
   return { ok: true, username: targetId, role: nextRole };
 });
@@ -359,6 +413,7 @@ exports.resetUserPassword = onCall({ maxInstances: 5 }, async request => {
     passwordResetBy: actorUid,
     passwordResetAt: FieldValue.serverTimestamp()
   });
+  await syncAccountDirectory(targetId, (await userRef.get()).data());
 
   const pending = await db.collection("passwordResets")
     .where("userId", "==", targetId).where("status", "==", "pending").limit(100).get();
@@ -430,6 +485,7 @@ exports.deleteAccount = onCall({ maxInstances: 3 }, async request => {
   }
   const batch = db.batch();
   batch.delete(targetRef);
+  batch.delete(db.collection("accountDirectory").doc(targetId));
   batch.delete(db.collection("userCredentials").doc(targetId));
   const pending = await db.collection("passwordResets").where("userId", "==", targetId).limit(100).get();
   pending.docs.forEach(docSnap => batch.delete(docSnap.ref));
