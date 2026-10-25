@@ -45,3 +45,22 @@ jobs:
         run: npm test
       - name: Build with CI lint enforcement enabled
         run: npm run build
+      - name: Set up Node.js 22 for Cloud Functions
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Generate Functions lockfile using pinned versions
+        run: npm --prefix functions install --package-lock-only --ignore-scripts --no-audit
+      - name: Clean-install Functions dependencies
+        run: npm --prefix functions ci --ignore-scripts
+      - name: Test server-side credential helpers
+        run: npm --prefix functions test
+      - name: Check Functions source syntax
+        run: npm --prefix functions run check
+      - name: Upload generated Functions lockfile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kktr-functions-lockfile
+          path: functions/package-lock.json
+          retention-days: 7
