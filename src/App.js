@@ -42,40 +42,42 @@ const functions = getFunctions(app, "us-central1");
 const callBackend = (name, data) => httpsCallable(functions, name)(data);
 
 // ─── IN-APP REPORT SYSTEM v9.6 ────────────────────────────────────────────────
-async function sendInAppReport({
+async async function sendInAppReport({
   type="general",
   title="Report",
   body="",
   fromUser=null,
   toRole="coo",
   dept="",
+  period="",
   pdfUrl=null
 }){
-  try{
-    await addDoc(collection(db,"reports"),{
-      type,
-      title,
-      body,
-      dept,
-      from:fromUser?.name||fromUser?.username||"Unknown",
-      fromRole:fromUser?.role||"",
+  const from=fromUser?.name||fromUser?.username||"";
+  const fromRole=fromUser?.role||"";
+  const reportRef=doc(collection(db,"reports"));
+  const notificationRef=doc(collection(db,"notifications"));
+  await runTransaction(db,async(transaction)=>{
+    transaction.set(reportRef,{
+      type,title,body,dept,from,fromRole,
+      submittedBy:from,
+      fromDept:dept,
+      period,
       toRole,
+      targetRole:toRole,
       pdfUrl:pdfUrl||null,
       status:"submitted",
       createdAt:serverTimestamp()
     });
-    // Notification to COO
-    await addDoc(collection(db,"notifications"),{
+    transaction.set(notificationRef,{
       type:"report",
-      title:"📊 New Report",
+      title:"New Report",
       message:title,
       toRole,
+      targetRole:toRole,
       read:false,
       createdAt:serverTimestamp()
     });
-  }catch(e){
-    console.log("Report error:",e);
-  }
+  });
 }
 
 // ─── PDF EXPORT v9.6 ─────────────────────────────────────────────────────────
@@ -2618,8 +2620,9 @@ function HRReportSender({user}){
   const [loading,setLoading]=useState(false);
   const [reportType,setReportType]=useState("attendance");
   const [month,setMonth]=useState(()=>new Date().toISOString().slice(0,7));
-  const COO_WHATSAPP="233XXXXXXXXX"; // Admin updates in Settings
-  const COO_EMAIL="coo@kktr.com";
+  // External delivery is unavailable until verified contacts are configured.
+  const COO_WHATSAPP="";
+  const COO_EMAIL="";
 
   const buildAttendanceText=async()=>{
     const snap=await getDocs(collection(db,"attendanceReports"));
@@ -2669,29 +2672,32 @@ function HRReportSender({user}){
         :await buildChopText();
       if(!text){ showToast("No data for "+month,"warn"); setLoading(false); return; }
 
-      // Save to unified reports collection so COO sees in-app
-      try {
-        await sendInAppReport({
-          type:reportType,
-          title:`${reportType==="attendance"?"Attendance":"Chop Money"} Report — ${month}`,
-          body:text,
-          fromUser:user,
-          toRole:"coo",
-          dept:"HR"
-        });
-      } catch(e){ queueOffline("reports",{type:reportType,
-        title:`HR ${reportType} Report`,body:text,
-        fromRole:"hr",toRole:"coo",dept:"HR",status:"submitted"}); }
+      // Do not report success if the database did not commit the report.
+      await sendInAppReport({
+        type:reportType,
+        title:`${reportType==="attendance"?"Attendance":"Chop Money"} Report — ${month}`,
+        body:text,
+        fromUser:user,
+        toRole:"coo",
+        dept:"HR",
+        period:month
+      });
 
       if(method==="whatsapp"){
+        if(!/^\d{10,15}$/.test(COO_WHATSAPP)){
+          throw new Error("WhatsApp delivery is unavailable until an authorized administrator configures and verifies the COO number.");
+        }
         window.open(`https://wa.me/${COO_WHATSAPP}?text=${encodeURIComponent(text)}`,"_blank");
-        showToast("✅ Opening WhatsApp…");
+        showToast("WhatsApp opened. Confirm delivery in WhatsApp; opening it does not mean the report was delivered.","warn");
       } else if(method==="email"){
+        if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(COO_EMAIL)){
+          throw new Error("Email delivery is unavailable until an authorized administrator configures and verifies the COO address.");
+        }
         const sub=encodeURIComponent(`KKTR ${reportType==="attendance"?"Attendance":"Chop Money"} Report — ${month}`);
         window.open(`mailto:${COO_EMAIL}?subject=${sub}&body=${encodeURIComponent(text)}`,"_blank");
-        showToast("✅ Opening Email…");
+        showToast("Email composer opened. Confirm sending in your email app.","warn");
       } else {
-        showToast("✅ Report sent to COO in-app!");
+        showToast("Report submitted to COO in-app.");
       }
     } catch(e){ showToast("Failed: "+e.message,"danger"); }
     setLoading(false);
@@ -3818,7 +3824,7 @@ function COOHRReport({user,sigName,letterhead,shareReport}){
               ))}
             </div>
           )}
-          {detail.reportText&&(
+          {(detail.body||detail.text||detail.reportText)&&(
             <div style={{background:C.panel,padding:"10px",borderRadius:"8px",
               fontSize:"0.72rem",whiteSpace:"pre-wrap",fontFamily:"monospace",
               maxHeight:"200px",overflowY:"auto",color:C.forest,marginTop:"10px"}}>
