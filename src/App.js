@@ -4108,7 +4108,7 @@ function SettingsModule({user,onLogout,onInstall}){
     getDoc(doc(db,"settings","company"))
       .then(s=>{ if(s.exists()&&s.data().logoUrl) setLogo(s.data().logoUrl); }).catch(()=>{});
     return()=>{uU();uP();};
-  },[user]);
+  },[user,showToast]);
 
   const approveUser=async(id)=>{
     try{
