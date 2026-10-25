@@ -1272,7 +1272,7 @@ function LubesModule({user}){
                   {user.role==="admin"&&(
                     <button onClick={()=>deleteTx(t)} style={{background:"none",
                       border:"none",color:C.danger,cursor:"pointer",fontSize:"0.72rem",fontWeight:700}}>
-                      🗑 Delete</button>
+                      ↩ Reverse</button>
                   )}
                 </div>
               </div>
@@ -2832,28 +2832,29 @@ function StaffRoster({user}){
       s=>setWorkers(s.docs.map(d=>({id:d.id,...d.data()}))));
   },[]);
   const add=async(f)=>{
-    if(!f.name||!f.dept) return showToast("Name and dept required","warn");
-    // Prevent duplicate workers — normalized nameKey check
-    const normalizedName=(f.name||"").trim().toLowerCase();
-    const existing=await getDocs(query(collection(db,"workers"),
-      where("nameKey","==",normalizedName)));
-    if(!existing.empty){
-      showToast("Worker already exists","danger");
-      return;
-    }
-    try {
-      await addDoc(collection(db,"workers"),{
-        nameKey:normalizedName,
-        name:f.name.trim(),dept:f.dept,type:f.type||"casual",
-        staffId:f.staffId||"",addedBy:user?.name||user?.username||"Unknown",
-        createdAt:serverTimestamp()
+    if(!f.name||!f.dept) return showToast("Name and department are required.","warn");
+    try{
+      await callBackend("addWorker",{
+        name:f.name,
+        dept:f.dept,
+        type:f.type||"casual",
+        staffId:f.staffId||""
       });
-      showToast("✅ Worker added!"); setModal(false);
-    } catch(e){ showToast("Failed: "+e.message,"danger"); }
+      showToast("Worker added successfully.");
+      setModal(false);
+    }catch(e){
+      const message=e?.code==="functions/already-exists"
+        ?"A worker with this name already exists."
+        :e?.message||"Worker could not be added.";
+      showToast(message,"danger");
+    }
   };
   const remove=async(id)=>{
-    if(!window.confirm("Remove this worker?")) return;
-    await deleteDoc(doc(db,"workers",id));
+    if(!window.confirm("Remove this worker? Historical attendance and chop-money records will be retained.")) return;
+    try{
+      await callBackend("deleteWorker",{workerId:id});
+      showToast("Worker removed. Historical records were retained.");
+    }catch(e){ showToast(e?.message||"Worker could not be removed.","danger"); }
   };
   const grouped=DEPTS.reduce((a,d)=>{a[d]=workers.filter(w=>w.dept===d);return a;},{});
   return(
