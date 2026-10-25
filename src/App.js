@@ -4,9 +4,8 @@ import {
   getFirestore, enableIndexedDbPersistence,
   doc, setDoc, getDoc, getDocs, addDoc,
   updateDoc, deleteDoc, collection, query, where, orderBy,
-  onSnapshot, serverTimestamp, enableNetwork, runTransaction, increment
+  onSnapshot, serverTimestamp, runTransaction, increment
 } from "firebase/firestore";
-import { getDatabase, ref, push, onValue, off, update } from "firebase/database";
 import { getStorage, ref as sRef, uploadBytes, getDownloadURL } from "firebase/storage";
 
 // ─── FIREBASE v7.0 — PROVEN WORKING CONFIG ───────────────────────────────────
@@ -35,7 +34,6 @@ enableIndexedDbPersistence(db).catch(err => {
     console.log("[KKTR] Persistence: not supported on this browser");
   }
 });
-const rtdb = getDatabase(app);
 const storage = getStorage(app);
 
 // ─── IN-APP REPORT SYSTEM v9.6 ────────────────────────────────────────────────
@@ -304,21 +302,6 @@ const ADMIN_USER = "abraham.sackey";
 
 // Safe name helper — prevents crash if user.name is undefined
 const getFirstName = u => (u?.name||u?.username||"User").split(" ")[0];
-
-// ─── ROLE-BASED PERMISSIONS ───────────────────────────────────────────────────
-const PERMISSIONS = {
-  admin:         ["all"],
-  coo:           ["reqs_approve_coo","reqs_create","chat","reports"],
-  store_manager: ["lubes_read","lubes_write","items_read","items_write",
-                  "transactions","issue_stock","receipts","reports","chat","reqs_view"],
-  hr:            ["attendance","chop_money","staff_management","chat","reqs_create","reqs_view"],
-  dept:          ["reqs_create","reqs_view","chat","attendance","receipts"]
-};
-function can(user, perm){
-  if(!user||!user.role) return false;
-  const perms = PERMISSIONS[user.role] || [];
-  return perms.includes("all") || perms.includes(perm);
-}
 
 const C = {
   forest:"#1a2e1a", bark:"#3d2b1f", timber:"#8B5E3C", gold:"#C8951A",
@@ -948,7 +931,6 @@ function DeptDashboard({user,onNav}){
         setReqs(all);
       },()=>{});
     // v9.4: count unread from all 3 staff role threads for this dept
-    let totalUnread=0;
     const uChats=STAFF_ROLES.map(r=>{
       const tid=threadKey(user.dept,r);
       return onSnapshot(
@@ -1546,7 +1528,6 @@ function ReqsModule({user}){
   // v8.4 STRICT ROLES — use user.role only, never dept for authority
   const isAdmin = user.role === "admin";
   const isCOO   = user.role === "coo";
-  const isHR    = user.role === "hr"; // v8.6 strict
 
   // ROUTING RULE:
   // Admin creates → approverRole:"coo" → COO approves
@@ -2154,8 +2135,6 @@ function DeptInbox({user}){
       myRole={dept}
       onBack={()=>setActiveRole(null)}/>;
 
-  const totalUnread=Object.values(unread).reduce((s,n)=>s+n,0);
-
   return(
     <div style={{padding:"0 12px 80px"}}>
       <div style={{paddingTop:"4px",marginBottom:"14px"}}>
@@ -2588,7 +2567,6 @@ function AttendanceModule({user}){
 // ─── HR MODULE ────────────────────────────────────────────────────────────────
 function HRModule({user}){
   const [tab,setTab]=useState("roster");
-  const isHR=user.role==="hr"; // v8.6 strict
   return(
     <div style={{padding:"0 12px 80px"}}>
       <div style={{fontWeight:800,fontSize:"1.2rem",color:C.forest,
@@ -3600,7 +3578,6 @@ function COOAttendReport({user,sigName,letterhead,shareReport}){
     }
   };
 
-  const sh=shareReport(buildText(),"COO Attendance Report");
   return(
     <div>
       {DEPTS.map(dept=>{
@@ -3812,7 +3789,7 @@ function COOHRReport({user,sigName,letterhead,shareReport}){
                 <div key={k} style={{display:"flex",justifyContent:"space-between",
                   padding:"3px 0",borderBottom:`1px dashed ${C.border}`}}>
                   <span style={{textTransform:"capitalize",color:C.timber}}>{k.replace(/([A-Z])/g," $1")}</span>
-                  <span style={{fontWeight:700}}>{typeof v==="number"&&k.toLowerCase().includes("chop")||k.toLowerCase().includes("total")?`GH₵${v}`:v}</span>
+                  <span style={{fontWeight:700}}>{(typeof v==="number"&&(k.toLowerCase().includes("chop")||k.toLowerCase().includes("total")))?`GH₵${v}`:v}</span>
                 </div>
               ))}
             </div>
