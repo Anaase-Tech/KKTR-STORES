@@ -256,6 +256,11 @@ test("receipt image paths enforce department access and reject unsupported objec
     bytes,
     { contentType: "image/jpeg" }
   ));
+  await assertFails(uploadBytes(
+    storageRef(adminStorage, "receipts/missing-record.jpg"),
+    bytes,
+    { contentType: "image/jpeg" }
+  ));
   await assertSucceeds(getBytes(storageRef(yardStorage, "receipts/receipt-yard.jpg")));
   await assertFails(getBytes(storageRef(yardStorage, "receipts/receipt-mill.jpg")));
   await assertSucceeds(getBytes(storageRef(hrStorage, "receipts/receipt-mill.jpg")));
