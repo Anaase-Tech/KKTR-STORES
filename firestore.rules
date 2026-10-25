@@ -7,7 +7,7 @@ service cloud.firestore {
     }
     function hasProfile() { return signedIn() && exists(profilePath()); }
     function profile() { return get(profilePath()).data; }
-    function active() { return hasProfile() && profile().disabled != true; }
+    function active() { return hasProfile() && profile().disabled != true && request.auth.token.sessionVersion == profile().get('sessionVersion', 0); }
     function isRole(r) { return active() && profile().role == r; }
     function isAdmin() { return isRole('admin') && profile().approved == true; }
     function isHR() { return isRole('hr'); }
