@@ -54,6 +54,27 @@ test("report title and content are HTML-escaped before printing", () => {
   assert.match(app, /<pre>\$\{escapeHTML\(content\)\}<\/pre>/);
 });
 
+test("COO report delivery uses a consistent schema and does not claim failed writes succeeded", () => {
+  const start = app.indexOf("async function sendInAppReport(");
+  const end = app.indexOf("// ─── PDF EXPORT", start);
+  assert.ok(start >= 0 && end > start, "shared report writer must exist");
+  const writer = app.slice(start, end);
+  assert.match(writer, /transaction\.set\(reportRef/);
+  assert.match(writer, /targetRole:toRole/);
+  assert.match(writer, /toRole,/);
+  assert.match(writer, /submittedBy:from/);
+  assert.match(writer, /period,/);
+  assert.match(writer, /transaction\.set\(notificationRef/);
+  assert.doesNotMatch(writer, /catch\s*\(/, "report write errors must reach the caller");
+  const cooStart = app.indexOf("function COOHRReport(");
+  const cooEnd = app.indexOf("\\nfunction ", cooStart + 1);
+  const coo = app.slice(cooStart, cooEnd < 0 ? app.length : cooEnd);
+  assert.match(coo, /where\(\\"targetRole\\",\\"==\\",\\"coo\\"\)/);
+  assert.match(coo, /detail\.body\|\|detail\.text\|\|detail\.reportText/);
+  assert.doesNotMatch(app, /233XXXXXXXXX|coo@kktr\.com/);
+  assert.match(app, /delivery is unavailable until an authorized administrator configures and verifies/);
+});
+
 test("service-worker shell refers to real public icon files", () => {
   const match = serviceWorker.match(/const SHELL_URLS = \[([\s\S]*?)\];/);
   assert.ok(match, "service-worker shell URL list must exist");
