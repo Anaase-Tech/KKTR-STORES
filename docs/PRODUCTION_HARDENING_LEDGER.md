@@ -5,7 +5,7 @@
 - **Baseline:** main at commit b0b13f924cadb42222f6b6315d717b365a1d6a27
 - **Working branch:** hardening/phase-1-auth-pwa-ci
 - **Started:** 25 October 2026 (Africa/Accra, UTC+0)
-- **Status:** Branch CI-validated on commit 9b8094ca1aef4f45b832e1c104fc8ab5ae66b37e; 12 static guardrail tests pass and production build passes; **not approved for production deployment**.
+- **Status (2026-10-25):** Earlier commit `9b8094ca1aef4f45b832e1c104fc8ab5ae66b37e` passed the original 12-test/build gate. The branch now contains additional authentication/rules and reporting changes, including 21 static guardrail tests; the latest revision has **not yet been independently confirmed green in CI**. Current release status remains **NO-GO**. The branch is also two commits behind `main`; reconcile and re-test before merge.
 
 ## Operating rule
 
