@@ -42,7 +42,7 @@ const functions = getFunctions(app, "us-central1");
 const callBackend = (name, data) => httpsCallable(functions, name)(data);
 
 // ─── IN-APP REPORT SYSTEM v9.6 ────────────────────────────────────────────────
-async async function sendInAppReport({
+async function sendInAppReport({
   type="general",
   title="Report",
   body="",
