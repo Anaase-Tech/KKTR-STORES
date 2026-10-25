@@ -1,0 +1,294 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+    function profileExists() {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+    function profile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+    function active() {
+      return profileExists() && profile().disabled != true;
+    }
+    function roleIs(value) {
+      return active() && profile().role == value;
+    }
+    function admin() {
+      return roleIs('admin') && profile().approved == true;
+    }
+    function hr() {
+      return roleIs('hr');
+    }
+    function coo() {
+      return roleIs('coo');
+    }
+    function stores() {
+      return admin() || roleIs('store_manager');
+    }
+    function staff() {
+      return admin() || hr() || coo() || roleIs('store_manager');
+    }
+    function departmentHead() {
+      return roleIs('dept') && profile().approved == true;
+    }
+    function sameDepartment(data) {
+      return active() && data.dept == profile().dept;
+    }
+    function allowedDepartment(value) {
+      return value in [
+        'Log Yard', 'Sawmill', 'Saw Shop', 'Workshop', 'Charcoal',
+        'Kindry', 'Chainsaw', 'Security', 'Administration', 'HR'
+      ];
+    }
+    function transactionStockDeltaMatches(stockPath, transactionId) {
+      let before = get(stockPath);
+      let after = getAfter(stockPath);
+      let tx = getAfter(/databases/$(database)/documents/transactions/$(transactionId));
+      return before.exists() && after.exists() && tx.exists() &&
+        after.data.lastTransactionId == transactionId &&
+        tx.data.itemId is string &&
+        tx.data.qty is number && tx.data.qty > 0 &&
+        ((tx.data.action == 'issue' &&
+          after.data.currentStock == before.data.currentStock - tx.data.qty) ||
+         (tx.data.action == 'restock' &&
+          after.data.currentStock == before.data.currentStock + tx.data.qty));
+    }
+    function validLubeStockUpdate(lubeId) {
+      return stores() &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['currentStock', 'lastTransactionId', 'updatedAt']) &&
+        request.resource.data.currentStock is number &&
+        request.resource.data.currentStock >= 0 &&
+        request.resource.data.lastTransactionId is string &&
+        transactionStockDeltaMatches(
+          /databases/$(database)/documents/lubricants/$(lubeId),
+          request.resource.data.lastTransactionId
+        );
+    }
+    function validStoreStockUpdate(itemId) {
+      return stores() &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['currentStock', 'lastTransactionId', 'updatedAt']) &&
+        request.resource.data.currentStock is number &&
+        request.resource.data.currentStock >= 0 &&
+        request.resource.data.lastTransactionId is string &&
+        transactionStockDeltaMatches(
+          /databases/$(database)/documents/storeItems/$(itemId),
+          request.resource.data.lastTransactionId
+        );
+    }
+
+    match /users/{username} {
+      allow get: if active() && request.auth.uid == username;
+      allow list, create, update, delete: if false;
+    }
+    match /userCredentials/{username} {
+      allow read, write: if false;
+    }
+    match /_securityRateLimits/{limitId} {
+      allow read, write: if false;
+    }
+    match /accountDirectory/{username} {
+      allow read: if admin();
+      allow write: if false;
+    }
+    match /settings/{settingId} {
+      allow get: if active() && (admin() || settingId == 'company');
+      allow list: if admin();
+      allow create, update: if admin();
+      allow delete: if false;
+    }
+    match /workers/{workerId} {
+      allow read: if admin() || hr() || (departmentHead() && resource.data.dept == profile().dept);
+      allow create: if hr() &&
+        request.resource.data.name is string &&
+        request.resource.data.name.size() >= 2 &&
+        allowedDepartment(request.resource.data.dept);
+      allow update: if hr() &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['name', 'nameKey', 'dept', 'type', 'staffId']);
+      allow delete: if hr();
+    }
+    match /attendance/{attendanceId} {
+      allow read: if staff() || (departmentHead() && sameDepartment(resource.data));
+      allow create: if (departmentHead() && sameDepartment(request.resource.data) ||
+                        hr()) &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.workerId is string &&
+        request.resource.data.date is string &&
+        request.resource.data.present is bool &&
+        exists(/databases/$(database)/documents/workers/$(request.resource.data.workerId)) &&
+        get(/databases/$(database)/documents/workers/$(request.resource.data.workerId)).data.dept == request.resource.data.dept;
+      allow update: if (
+          hr() &&
+          resource.data.status == 'pending' &&
+          request.resource.data.status in ['approved', 'rejected'] &&
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['status', 'approvedBy', 'approvedAt'])
+        ) || (
+          departmentHead() &&
+          sameDepartment(resource.data) &&
+          resource.data.status == 'pending' &&
+          request.resource.data.status == 'pending' &&
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['present', 'markedBy', 'createdAt'])
+        );
+      allow delete: if false;
+    }
+    match /attendanceReports/{reportId} {
+      allow read: if hr() || coo() || admin();
+      allow create: if hr() &&
+        request.resource.data.dept is string &&
+        request.resource.data.status in ['pending', 'submitted'];
+      allow update: if hr() &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status', 'approvedBy', 'approvedAt']);
+      allow delete: if false;
+    }
+    match /chopMoney/{submissionId} {
+      allow read: if hr() || coo() || admin() ||
+        (departmentHead() && resource.data.dept == profile().dept);
+      allow create: if departmentHead() &&
+        request.resource.data.dept == profile().dept &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.totalAmount is number;
+      allow update: if hr() &&
+        resource.data.status == 'pending' &&
+        request.resource.data.status in ['paid', 'rejected'] &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status', 'paidBy', 'paidAt', 'rejectedBy', 'rejectedAt']);
+      allow delete: if false;
+    }
+    match /lubricants/{lubeId} {
+      allow read: if stores();
+      allow create: if stores() &&
+        request.resource.data.name is string &&
+        request.resource.data.currentStock is number &&
+        request.resource.data.currentStock >= 0;
+      allow update: if validLubeStockUpdate(lubeId);
+      allow delete: if false;
+    }
+    match /storeItems/{itemId} {
+      allow read: if active();
+      allow create: if stores() &&
+        request.resource.data.name is string &&
+        request.resource.data.currentStock is number &&
+        request.resource.data.currentStock >= 0;
+      allow update: if validStoreStockUpdate(itemId);
+      allow delete: if false;
+    }
+    match /transactions/{transactionId} {
+      allow read: if stores() || coo();
+      allow create: if stores() &&
+        request.resource.data.type in ['lube', 'store'] &&
+        request.resource.data.action in ['issue', 'restock'] &&
+        request.resource.data.qty is number &&
+        request.resource.data.qty > 0 &&
+        ((request.resource.data.type == 'lube' &&
+          transactionStockDeltaMatches(
+            /databases/$(database)/documents/lubricants/$(request.resource.data.itemId),
+            transactionId
+          )) ||
+         (request.resource.data.type == 'store' &&
+          transactionStockDeltaMatches(
+            /databases/$(database)/documents/storeItems/$(request.resource.data.itemId),
+            transactionId
+          )));
+      allow update, delete: if false;
+    }
+    match /requisitions/{requisitionId} {
+      allow read: if admin() || coo() ||
+        (active() && resource.data.dept == profile().dept);
+      allow create: if active() &&
+        request.resource.data.dept == profile().dept &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.approverRole == (profile().role == 'admin' ? 'coo' : 'admin');
+      allow update: if (
+          admin() && resource.data.approverRole == 'admin' ||
+          coo() && resource.data.approverRole == 'coo'
+        ) &&
+        resource.data.status == 'pending' &&
+        request.resource.data.status in ['approved', 'rejected'] &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status', 'approvedBy', 'approvedRole', 'approvedAt',
+                    'rejectedBy', 'rejectedRole', 'rejectedAt', 'rejectionNote']);
+      allow delete: if false;
+    }
+    match /requisitionHistory/{historyId} {
+      allow read: if admin() || coo() ||
+        (active() && resource.data.dept == profile().dept);
+      allow create: if (admin() || coo()) &&
+        request.resource.data.action in ['approved', 'rejected'];
+      allow update, delete: if false;
+    }
+    match /reports/{reportId} {
+      allow read: if admin() || hr() || coo();
+      allow create: if active() &&
+        (admin() || hr() || roleIs('store_manager')) &&
+        (request.resource.data.toRole == 'coo' || request.resource.data.targetRole == 'coo');
+      allow update: if (admin() || coo()) &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status', 'reviewedBy', 'reviewedAt']);
+      allow delete: if false;
+    }
+    match /notifications/{notificationId} {
+      allow read: if active() &&
+        (resource.data.toUserId == request.auth.uid ||
+         resource.data.toRole == profile().role);
+      allow create: if active() &&
+        (request.resource.data.toUserId == request.auth.uid ||
+         request.resource.data.toRole == profile().role ||
+         admin() || hr() || coo());
+      allow update: if active() &&
+        (resource.data.toUserId == request.auth.uid ||
+         resource.data.toRole == profile().role) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']) &&
+        request.resource.data.read is bool;
+      allow delete: if false;
+    }
+    match /passwordResets/{resetId} {
+      allow read: if admin();
+      allow create, update, delete: if false;
+    }
+    match /chats/{threadId}/messages/{messageId} {
+      function isStaffThread() {
+        return staff() &&
+          threadId.matches('^(Log Yard|Sawmill|Saw Shop|Workshop|Charcoal|Kindry|Chainsaw|Security|Administration|HR)\\|\\|' + profile().role + '$');
+      }
+      function isOwnDepartmentThread() {
+        return departmentHead() &&
+          (threadId == profile().dept + '||admin' ||
+           threadId == profile().dept + '||hr' ||
+           threadId == profile().dept + '||coo');
+      }
+      allow read: if isStaffThread() || isOwnDepartmentThread();
+      allow create: if (isStaffThread() || isOwnDepartmentThread()) &&
+        request.resource.data.text is string &&
+        request.resource.data.text.size() <= 5000 &&
+        request.resource.data.dept is string &&
+        allowedDepartment(request.resource.data.dept) &&
+        request.resource.data.role == profile().role;
+      allow update: if (isStaffThread() || isOwnDepartmentThread()) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']) &&
+        request.resource.data.read is bool;
+      allow delete: if false;
+    }
+    match /receipts/{receiptId} {
+      allow read: if admin() || hr() || (active() && resource.data.dept == profile().dept);
+      allow create: if active() &&
+        request.resource.data.dept == profile().dept &&
+        request.resource.data.recordedBy is string;
+      allow update: if (admin() || hr() ||
+          (active() && resource.data.dept == profile().dept)) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['imageUrl']);
+      allow delete: if false;
+    }
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
