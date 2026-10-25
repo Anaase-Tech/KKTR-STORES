@@ -5,7 +5,7 @@
 - **Baseline:** main at commit b0b13f924cadb42222f6b6315d717b365a1d6a27
 - **Working branch:** hardening/phase-1-auth-pwa-ci
 - **Started:** 25 October 2026 (Africa/Accra, UTC+0)
-- **Status:** Phase-one changes prepared for automated verification; **not approved for production deployment**.
+- **Status:** Phase-one branch CI-validated on commit 68030a241714129a8351ce4039858d1f1d75a667; **not approved for production deployment**.
 
 ## Operating rule
 
@@ -44,8 +44,13 @@ These are not claimed to be fixed in phase one. Each must be closed with code, r
 ### P0 — Build and release evidence
 
 - This branch has not been merged or deployed.
-- The independent local clone/build could not be run in the prior audit because the execution environment could not resolve github.com. GitHub Actions has now successfully installed the corrected lockfile and run the guardrail tests; the first enforced production build exposed an undefined showToast reference in ChatThread. The source fix is committed, and a successful workflow on the latest branch head is still required before sign-off.
-- Do not deploy if npm ci, tests, linting, or the production build fails. Do not reintroduce CI=false or DISABLE_ESLINT_PLUGIN=true to force a green build; fix the underlying warnings/errors and document any justified exception.
+- GitHub Actions run 40192689521 passed on commit 68030a241714129a8351ce4039858d1f1d75a667: npm ci, all 11 regression guardrail tests, and the production build with CI=true and ESLint enforcement. See https://github.com/Anaase-Tech/KKTR-STORES/actions/runs/40192689521. This is a CI build result, not a Firebase integration test or a production deployment acceptance test.
+- Earlier CI runs exposed a stale TypeScript lockfile entry, an undefined showToast reference, unused variables/imports, and a mixed-operator warning. The lock and source were repaired rather than bypassing lint. Keep the quality gate enabled.
+
+### P1 — Dependency supply-chain risk
+
+- The successful CI dependency installation reported 65 package vulnerabilities across the installed dependency tree: 10 low, 18 moderate, 34 high, and 3 critical. This count is not yet triaged by production reachability and does not establish that every advisory affects deployed browser code, but it is a release blocker until reviewed.
+- Run and record a complete npm audit advisory review, distinguish build-only from shipped dependencies, identify the exact vulnerable packages and available non-breaking fixes, then upgrade and retest. Do not use npm audit fix --force blindly or suppress the report. Re-run audit after remediation and document any risk that remains accepted by the project owner.
 
 ### P1 — Offline inventory integrity and queued writes
 
