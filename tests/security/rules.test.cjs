@@ -54,6 +54,7 @@ test.beforeEach(async () => {
       ["admin", { id: "admin", username: "admin", name: "Admin", role: "admin", dept: "Administration", approved: true }],
       ["hr", { id: "hr", username: "hr", name: "HR Officer", role: "hr", dept: "HR", approved: true }],
       ["coo", { id: "coo", username: "coo", name: "COO", role: "coo", dept: "Administration", approved: true }],
+      ["coo-secondary", { id: "coo-secondary", username: "coo-secondary", name: "Second COO", role: "coo", dept: "Administration", approved: true }],
       ["stores", { id: "stores", username: "stores", name: "Stores Manager", role: "store_manager", dept: "Administration", approved: true }],
       ["yard-head", { id: "yard-head", username: "yard-head", name: "Yard Head", role: "dept", dept: "Log Yard", approved: true }],
       ["mill-head", { id: "mill-head", username: "mill-head", name: "Mill Head", role: "dept", dept: "Sawmill", approved: true }]
@@ -62,6 +63,14 @@ test.beforeEach(async () => {
       await setDoc(doc(db, "users", id), profile);
       await setDoc(doc(db, "accountDirectory", id), profile);
     }
+    await setDoc(doc(db, "notifications", "targeted-coo"), {
+      type: "report", title: "Targeted report notice", message: "Private to one COO",
+      reportId: "report-1", toUserId: "coo", toRole: "coo", read: false
+    });
+    await setDoc(doc(db, "notifications", "legacy-role-coo"), {
+      type: "system", title: "Legacy role notice", message: "Role-wide legacy notice",
+      toRole: "coo", read: false
+    });
     await setDoc(doc(db, "userCredentials", "yard-head"), {
       algorithm: "scrypt", salt: "private-salt", hash: "private-hash"
     });
@@ -115,6 +124,31 @@ test("session-version claims revoke a stale authenticated session", async () => 
   });
   await assertFails(getDoc(doc(asUser("yard-head", { sessionVersion: 0 }), "users", "yard-head")));
   await assertSucceeds(getDoc(doc(asUser("yard-head", { sessionVersion: 1 }), "users", "yard-head")));
+});
+
+test("reports cannot be created directly by browser clients", async () => {
+  const report = {
+    type: "stores",
+    title: "Stores report",
+    body: "Client-created report must be denied",
+    toRole: "coo",
+    targetRole: "coo",
+    status: "submitted"
+  };
+  for (const uid of ["admin", "hr", "stores", "coo"]) {
+    await assertFails(setDoc(doc(asUser(uid), "reports", "direct-" + uid), report));
+  }
+});
+
+test("targeted report notifications are private to their recipient", async () => {
+  const primary = asUser("coo");
+  const secondary = asUser("coo-secondary");
+  await assertSucceeds(getDoc(doc(primary, "notifications", "targeted-coo")));
+  await assertFails(getDoc(doc(secondary, "notifications", "targeted-coo")));
+  await assertFails(updateDoc(doc(secondary, "notifications", "targeted-coo"), { read: true }));
+  await assertSucceeds(updateDoc(doc(primary, "notifications", "targeted-coo"), { read: true }));
+  // Old role-only notifications remain readable for backward compatibility.
+  await assertSucceeds(getDoc(doc(secondary, "notifications", "legacy-role-coo")));
 });
 
 test("unauthenticated and ordinary users cannot read private credential material", async () => {
