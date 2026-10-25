@@ -4023,53 +4023,42 @@ function SettingsModule({user,onLogout,onInstall}){
   },[user]);
 
   const approveUser=async(id)=>{
-    await updateDoc(doc(db,"users",id),{approved:true});
-    showToast("✅ Account approved!");
+    try{
+      await callBackend("approveDepartmentHead",{username:id});
+      showToast("Account approved.");
+    }catch(e){ showToast(e?.message||"Account approval failed.","danger"); }
   };
   const deleteUser=async(id,name)=>{
-    if(!window.confirm(`Delete account for ${name}?`)) return;
-    await deleteDoc(doc(db,"users",id));
-    showToast("Account deleted.");
+    if(!window.confirm("Delete account for "+name+"?")) return;
+    try{
+      await callBackend("deleteAccount",{username:id});
+      showToast("Account and sign-in credentials deleted. Historical business records are retained.");
+    }catch(e){ showToast(e?.message||"Account deletion failed.","danger"); }
   };
   const resetPwd=async(target)=>{
-    if(!newPwd||newPwd.length<6) return showToast("Min 6 characters","warn");
+    if(!newPwd||newPwd.length<12) return showToast("New password must contain at least 12 characters.","warn");
     setLoading(true);
-    try {
-      // Hash the new password before storing — never store plain text
-      const newHash=await hashPwd(newPwd);
-      await updateDoc(doc(db,"users",target.id),{
-        pwdHash:newHash,
-        pendingPasswordReset:null,
-        passwordResetBy:user?.name||user?.username||"Admin",
-        passwordResetAt:serverTimestamp()
-      });
-      const rSnap=await getDocs(query(collection(db,"passwordResets"),
-        where("userId","==",target.id),where("status","==","pending")));
-      for(const d of rSnap.docs)
-        await updateDoc(doc(db,"passwordResets",d.id),{status:"completed"});
-      showToast(`✅ Password for ${target.name||target.username} reset!`);
+    try{
+      await callBackend("resetUserPassword",{username:target.id,newPassword:newPwd});
+      showToast("Password reset completed. The account must sign in with the new password.");
       setResetTarget(null); setNewPwd("");
-    } catch(e){ showToast("Failed: "+e.message,"danger"); }
-    setLoading(false);
+    }catch(e){ showToast(e?.message||"Password reset failed.","danger"); }
+    finally{ setLoading(false); }
   };
+
   const changeMyPwd=async()=>{
     if(!myOldPwd||!myNewPwd) return showToast("Fill both fields","warn");
-    if(myNewPwd.length<6) return showToast("Min 6 characters","warn");
+    if(myNewPwd.length<12) return showToast("New password must contain at least 12 characters.","warn");
     setLoading(true);
-    try {
-      const oldHash=await hashPwd(myOldPwd);
-      const snap=await getDoc(doc(db,"users",user.username));
-      if(!snap.exists()||snap.data().pwdHash!==oldHash){
-        showToast("Current password is wrong","danger"); setLoading(false); return;
-      }
-      const newHash=await hashPwd(myNewPwd);
-      await updateDoc(doc(db,"users",user.username),{pwdHash:newHash});
-      Sess.save({...user,pwdHash:newHash});
-      showToast("✅ Password changed!");
+    try{
+      await callBackend("changeOwnPassword",{oldPassword:myOldPwd,newPassword:myNewPwd});
+      showToast("Password changed successfully.");
       setMyOldPwd(""); setMyNewPwd("");
-    } catch(e){ showToast("Failed: "+e.message,"danger"); }
-    setLoading(false);
+    }catch(e){
+      showToast(e?.code==="functions/unauthenticated"?"Current password is incorrect.":e?.message||"Password change failed.","danger");
+    }finally{ setLoading(false); }
   };
+
   const handleLogo=async(e)=>{
     const file=e.target.files[0]; if(!file) return;
     setLogoLoading(true);
@@ -4134,51 +4123,10 @@ function SettingsModule({user,onLogout,onInstall}){
     showToast("✅ Default lubricants added!");
   };
   const factoryReset=async()=>{
-    if(!factoryPwd){ showToast("Enter admin password","warn"); return; }
-    const hash=await hashPwd(factoryPwd);
-    const snap=await getDoc(doc(db,"users",ADMIN_USER));
-    if(!snap.exists()||snap.data().pwdHash!==hash){
-      showToast("Wrong admin password","danger"); return;
-    }
-    if(!window.confirm("⚠ Clear ALL transactions, requisitions, attendance and receipts?")) return;
-    setLoading(true);
-    try {
-      // Main collections
-      for(const col of ["transactions","requisitions","receipts","chopMoney",
-        "attendanceReports","attendance","passwordResets",
-        "notifications","requisitionHistory"]){
-        const s=await getDocs(collection(db,col));
-        for(const d of s.docs) await deleteDoc(doc(db,col,d.id));
-      }
-      // Clear chat threads — new format: {dept}_{role}
-      for(const dept of DEPTS){
-        for(const role of STAFF_ROLES){
-          try {
-            const tid=threadKey(dept,role);
-            const msgs=await getDocs(collection(db,"chats",tid,"messages"));
-            for(const d of msgs.docs) await deleteDoc(d.ref);
-          } catch(e2){}
-        }
-      }
-      showToast("✅ Factory reset complete.");
-      // Clear all stale local caches — v9.6 full cleanup
-      localStorage.removeItem("kktr_unread");
-      localStorage.removeItem("kktr_chat_cache");
-      localStorage.removeItem("kktr_threads");
-      localStorage.removeItem(OFFLINE_CHAT_KEY);
-      localStorage.removeItem(OFFLINE_STOCK_KEY);
-      localStorage.removeItem("kktr_stock_queue_v96");
-      localStorage.removeItem("kktr_offline_attendance");
-      localStorage.removeItem("kktr_pending_sync");
-      if (window.indexedDB) {
-        try { indexedDB.deleteDatabase("kktr-offline-db"); } catch(e2) {}
-      }
-      setFactoryPwd("");
-    } catch(e){ showToast("Failed: "+e.message,"danger"); }
-    setLoading(false);
+    showToast("Factory reset is disabled. Production records may only be removed through a reviewed backup, retention, and recovery procedure.","warn");
   };
 
-  const clearChats=async()=>{
+    const clearChats=async()=>{
     if(!window.confirm("Delete all chat messages from all departments?")) return;
     setLoading(true);
     try {
@@ -4243,7 +4191,7 @@ function SettingsModule({user,onLogout,onInstall}){
           <Inp label="Current Password *" type="password" value={myOldPwd}
             onChange={e=>setMyOldPwd(e.target.value)}/>
           <Inp label="New Password *" type="password" value={myNewPwd}
-            onChange={e=>setMyNewPwd(e.target.value)} placeholder="Min 6 characters"/>
+            onChange={e=>setMyNewPwd(e.target.value)} placeholder="Minimum 12 characters"/>
           <Btn onClick={changeMyPwd} loading={loading}
             style={{width:"100%",justifyContent:"center"}}>Change Password</Btn>
         </Card>
@@ -4263,7 +4211,7 @@ function SettingsModule({user,onLogout,onInstall}){
                   {resetTarget?.id===r.userId?(
                     <div style={{marginTop:"8px",display:"flex",gap:"6px"}}>
                       <input value={newPwd} onChange={e=>setNewPwd(e.target.value)}
-                        type="password" placeholder="New password (min 6)"
+                        type="password" placeholder="New password (minimum 12 characters)"
                         style={{flex:1,padding:"8px",border:`1.5px solid ${C.border}`,
                           borderRadius:"8px",fontFamily:"inherit",fontSize:"0.85rem"}}/>
                       <Btn sm onClick={()=>resetPwd(resetTarget)} color={C.ok} loading={loading}>Set</Btn>
@@ -4313,8 +4261,12 @@ function SettingsModule({user,onLogout,onInstall}){
                   <div style={{display:"flex",gap:"4px",flexWrap:"wrap",justifyContent:"flex-end"}}>
                     <select value={u.role||"dept"}
                       onChange={async(e)=>{
-                        await updateDoc(doc(db,"users",u.id),{role:e.target.value});
-                        showToast(`✅ Role updated to ${e.target.value}`);
+                        try{
+                          await callBackend("setAccountRole",{username:u.id,role:e.target.value});
+                          showToast("Role updated to "+e.target.value);
+                        }catch(error){
+                          showToast(error?.message||"Role update failed.","danger");
+                        }
                       }}
                       style={{padding:"4px 6px",border:`1px solid ${C.border}`,
                         borderRadius:"6px",fontFamily:"inherit",fontSize:"0.72rem",
@@ -4462,14 +4414,10 @@ function SettingsModule({user,onLogout,onInstall}){
           <Card style={{border:`1.5px solid ${C.danger}`}}>
             <div style={{fontWeight:800,color:C.danger,marginBottom:"8px"}}>⚠ Factory Reset</div>
             <div style={{fontSize:"0.82rem",color:"#888",marginBottom:"12px"}}>
-              Clears all transactions, requisitions, attendance and receipts.
-              Accounts and stock items are kept.</div>
-            <Inp type="password" value={factoryPwd}
-              onChange={e=>setFactoryPwd(e.target.value)}
-              placeholder="Enter admin password to confirm"/>
-            <Btn onClick={factoryReset} loading={loading} color={C.danger}
+              Destructive factory reset is disabled. Permanent data removal requires a verified backup, a documented retention decision, and a recoverable server-side operation.</div>
+            <Btn onClick={factoryReset} outline color={C.danger}
               style={{width:"100%",justifyContent:"center"}}>
-              Factory Reset (Irreversible)</Btn>
+              View safety restriction</Btn>
           </Card>
         </div>
       )}
@@ -4580,16 +4528,68 @@ export default function App(){
 }
 
 function AppInner(){
-  const [user,setUser]=useState(Sess.load);
+  const [user,setUser]=useState(null);
+  const [authReady,setAuthReady]=useState(false);
   const [tab,setTab]=useState("home");
   const [installPrompt,setInstallPrompt]=useState(null);
   const [showInstall,setShowInstall]=useState(false);
 
   useEffect(()=>{
     const handler=e=>{ e.preventDefault(); setInstallPrompt(e); setShowInstall(true); };
+    const installed=()=>setShowInstall(false);
     window.addEventListener("beforeinstallprompt",handler);
-    window.addEventListener("appinstalled",()=>setShowInstall(false));
-    return()=>window.removeEventListener("beforeinstallprompt",handler);
+    window.addEventListener("appinstalled",installed);
+    return()=>{
+      window.removeEventListener("beforeinstallprompt",handler);
+      window.removeEventListener("appinstalled",installed);
+    };
+  },[]);
+
+  useEffect(()=>{
+    let active=true;
+    const unsubscribe=onAuthStateChanged(auth,async firebaseUser=>{
+      if(!active) return;
+      if(!firebaseUser){
+        Sess.clear();
+        setUser(null);
+        setAuthReady(true);
+        return;
+      }
+      const cached=Sess.load();
+      const cachedMatches=!!cached&&(cached.id===firebaseUser.uid||cached.username===firebaseUser.uid);
+      if(!navigator.onLine&&cachedMatches){
+        setUser(cached);
+        setAuthReady(true);
+        return;
+      }
+      try{
+        const snap=await getDoc(doc(db,"users",firebaseUser.uid));
+        if(!active) return;
+        if(!snap.exists()||snap.data().disabled===true){
+          Sess.clear();
+          setUser(null);
+          await signOut(auth);
+        }else{
+          const data={...snap.data(),id:snap.id,username:snap.id};
+          delete data.pwdHash;
+          delete data.passwordHash;
+          delete data.pendingPasswordReset;
+          Sess.save(data);
+          setUser(data);
+        }
+      }catch(error){
+        if(active&&cachedMatches){
+          // Offline access requires an existing Firebase Auth session and its matching
+          // cached profile; browser-stored passwords are never accepted as authentication.
+          setUser(cached);
+        }else if(active){
+          setUser(null);
+        }
+      }finally{
+        if(active) setAuthReady(true);
+      }
+    });
+    return()=>{ active=false; unsubscribe(); };
   },[]);
 
   const handleInstall=async()=>{
@@ -4600,7 +4600,7 @@ function AppInner(){
   };
 
   const login=u=>{ Sess.save(u); setUser(u); setTab("home"); };
-  const logout=()=>{ Sess.clear(); setUser(null); };
+  const logout=async()=>{ try{ await signOut(auth); } finally{ Sess.clear(); setUser(null); setTab("home"); } };
 
   // ─── ONLINE / OFFLINE STATUS ─────────────────────────────────────────────────
   const [online,setOnline]=useState(navigator.onLine);
@@ -4655,6 +4655,7 @@ function AppInner(){
     return()=>unsub();
   },[user]);
 
+  if(!authReady) return <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",color:C.timber,fontWeight:700}}>Restoring secure session…</div>;
   if(!user) return <AuthScreen onLogin={login}/>;
 
   const isAdmin=user.role==="admin";
