@@ -1,0 +1,47 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+    function profile() {
+      return firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data;
+    }
+    function active() {
+      return signedIn() &&
+        firestore.exists(/databases/(default)/documents/users/$(request.auth.uid)) &&
+        profile().disabled != true;
+    }
+    function admin() {
+      return active() && profile().role == 'admin' && profile().approved == true;
+    }
+    function hr() {
+      return active() && profile().role == 'hr';
+    }
+    function departmentMatches(receiptId) {
+      return active() &&
+        firestore.exists(/databases/(default)/documents/receipts/$(receiptId)) &&
+        firestore.get(/databases/(default)/documents/receipts/$(receiptId)).data.dept == profile().dept;
+    }
+
+    match /settings/logo.jpg {
+      allow read: if active();
+      allow create, update: if admin() &&
+        request.resource.size < 5 * 1024 * 1024 &&
+        request.resource.contentType.matches('image/(jpeg|png|webp)');
+      allow delete: if admin();
+    }
+
+    match /receipts/{receiptId}.jpg {
+      allow read: if admin() || hr() || departmentMatches(receiptId);
+      allow create, update: if (admin() || hr() || departmentMatches(receiptId)) &&
+        request.resource.size < 10 * 1024 * 1024 &&
+        request.resource.contentType.matches('image/(jpeg|png|webp)');
+      allow delete: if false;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
