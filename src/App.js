@@ -4061,7 +4061,15 @@ function SettingsModule({user,onLogout,onInstall}){
 
   useEffect(()=>{
     if(user.role!=="admin") return;
-    const uU=onSnapshot(collection(db,"users"),s=>setUsers(s.docs.map(d=>({id:d.id,...d.data()}))));
+    // Password hashes are private server-side records. Admins receive only the
+    // allow-listed account directory, which remains live via Firestore snapshots.
+    const uU=onSnapshot(collection(db,"accountDirectory"),
+      s=>setUsers(s.docs.map(d=>({id:d.id,...d.data()}))),
+      e=>showToast("Account list unavailable: "+e.message,"danger"));
+    callBackend("listAccounts",{}).catch(e=>{
+      console.error("[KKTR] Account directory bootstrap failed:",e?.code||"unknown");
+      showToast("Could not refresh the account directory. Check access and connection.","danger");
+    });
     const uP=onSnapshot(query(collection(db,"passwordResets"),where("status","==","pending")),
       s=>setPwdResets(s.docs.map(d=>({id:d.id,...d.data()}))));
     getDoc(doc(db,"settings","company"))
