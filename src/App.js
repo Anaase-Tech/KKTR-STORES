@@ -179,7 +179,13 @@ async function syncOfflineChats() {
         const date=(typeof rawDate==="string"||typeof rawDate==="number")
           ?new Date(rawDate):new Date(m.time||Date.now());
         const createdAt=Number.isNaN(date.getTime())?new Date(m.time||Date.now()):date;
-        await setDoc(doc(db,"chats",m.thread,"messages",m.id),{...m.payload,createdAt});
+        const messageRef=doc(db,"chats",m.thread,"messages",m.id);
+        const existing=await getDoc(messageRef,{source:"server"});
+        if(!existing.exists()){
+          await setDoc(messageRef,{...m.payload,createdAt});
+        }
+        // A prior attempt may have committed even if the client missed the acknowledgement.
+        // Seeing the stable message ID on the server means it was delivered; do not reset its read flag.
         completed.add(m.id);
       } catch(e) {
         failed.add(m.id);
@@ -228,10 +234,20 @@ async function syncOfflineStock() {
       for(const item of items){
         try{
           const d=new Date(item.payload?.createdAt||item.time||Date.now());
-          await setDoc(doc(db,"storeItems",item.id),{
-            ...item.payload,
-            createdAt:Number.isNaN(d.getTime())?new Date(item.time||Date.now()):d
-          });
+          const itemRef=doc(db,"storeItems",item.id);
+          const existing=await getDoc(itemRef,{source:"server"});
+          if(existing.exists()){
+            const existingData=existing.data();
+            const sameRequest=existingData.name===item.payload?.name &&
+              existingData.dept===item.payload?.dept &&
+              existingData.createdAt?.toMillis?.()===(Number.isNaN(d.getTime())?new Date(item.time||Date.now()):d).getTime();
+            if(!sameRequest) throw new Error("An item with this queued ID already exists with different data.");
+          }else{
+            await setDoc(itemRef,{
+              ...item.payload,
+              createdAt:Number.isNaN(d.getTime())?new Date(item.time||Date.now()):d
+            });
+          }
           completed.add(item.id);
         }catch(e){
           failed.add(item.id);
