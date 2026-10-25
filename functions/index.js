@@ -683,3 +683,142 @@ exports.submitReportToCOO = onCall({ maxInstances: 5 }, async request => {
     notificationRecipients: notificationRefs.length
   };
 });
+
+
+exports.approveAttendanceReportAndSendToCOO = onCall({ maxInstances: 5 }, async request => {
+  const { uid, profile } = await getCallerProfile(request);
+  if (profile.role !== "hr" || profile.approved !== true) {
+    fail("permission-denied", "Only an approved HR account can approve an attendance report.");
+  }
+
+  const sourceId = cleanText(request.data && request.data.attendanceReportId, 150);
+  if (!/^[A-Za-z0-9_-]{1,150}$/.test(sourceId)) {
+    fail("invalid-argument", "A valid attendance report ID is required.");
+  }
+
+  const sourceRef = db.collection("attendanceReports").doc(sourceId);
+  const reportRef = db.collection("reports").doc("attendance-report-" + sourceId);
+  const cooSnapshot = await db.collection("users").where("role", "==", "coo").get();
+  const recipients = cooSnapshot.docs.filter(docSnap => {
+    const candidate = docSnap.data();
+    return candidate.approved === true && candidate.disabled !== true;
+  });
+  if (recipients.length > 400) {
+    fail("resource-exhausted", "There are too many COO recipients to notify safely in one transaction.");
+  }
+  const actorName = cleanText(profile.name, 100) || uid;
+  const notificationRefs = recipients.map(recipient => ({
+    uid: recipient.id,
+    ref: db.collection("notifications").doc()
+  }));
+  let alreadySubmitted = false;
+  let recipientCount = recipients.length;
+
+  await db.runTransaction(async transaction => {
+    const [sourceSnap, existingReportSnap] = await Promise.all([
+      transaction.get(sourceRef),
+      transaction.get(reportRef)
+    ]);
+    if (!sourceSnap.exists) fail("not-found", "Attendance report was not found.");
+    const source = sourceSnap.data();
+
+    if (existingReportSnap.exists) {
+      if (source.reportId === reportRef.id && source.reportSentToCOO === true) {
+        alreadySubmitted = true;
+        recipientCount = Number(source.notificationRecipients) || 0;
+        return;
+      }
+      fail("already-exists", "An attendance report already uses this submission ID. An administrator must reconcile the records.");
+    }
+    if (!Array.isArray(source.summary)) {
+      fail("failed-precondition", "The attendance report has no valid worker summary.");
+    }
+    if (source.status !== "pending" && source.status !== "approved") {
+      fail("failed-precondition", "Only a pending or previously approved attendance report can be filed with the COO.");
+    }
+
+    const rows = source.summary.slice(0, 2000).map(row => ({
+      name: cleanText(row && row.name, 100) || "Unnamed worker",
+      present: Number.isFinite(Number(row && row.present)) ? Number(row.present) : 0,
+      absent: Number.isFinite(Number(row && row.absent)) ? Number(row.absent) : 0,
+      chopMoney: Number.isFinite(Number(row && row.chopMoney)) ? Number(row.chopMoney) : 0
+    }));
+    const totalPresent = rows.reduce((total, row) => total + row.present, 0);
+    const totalAbsent = rows.reduce((total, row) => total + row.absent, 0);
+    const totalChopMoney = rows.reduce((total, row) => total + row.chopMoney, 0);
+    const dept = cleanText(source.dept, 100) || "Unknown department";
+    const period = cleanText(source.month || source.monthStart || source.period, 100) || "Unspecified period";
+    const title = "Attendance Report — " + dept + " (" + period + ")";
+    const body = [
+      "KKTR ATTENDANCE REPORT",
+      "Department: " + dept,
+      "Period: " + period,
+      "",
+      ...rows.map(row => row.name + ": " + row.present + " present, " +
+        row.absent + " absent; chop money GH₵" + row.chopMoney),
+      "",
+      "TOTALS: " + totalPresent + " present | " + totalAbsent +
+        " absent | GH₵" + totalChopMoney + " chop money"
+    ].join("\n");
+
+    transaction.create(reportRef, {
+      type: "attendance",
+      title,
+      period,
+      dept,
+      from: actorName,
+      fromRole: profile.role,
+      submittedBy: actorName,
+      submittedByUid: uid,
+      fromDept: "HR",
+      toRole: "coo",
+      targetRole: "coo",
+      targetDept: "Administration",
+      status: "submitted",
+      summary: {
+        dept,
+        totalPresent,
+        totalAbsent,
+        totalChopMoney,
+        workers: rows.length
+      },
+      body,
+      reportText: body,
+      sourceAttendanceReportId: sourceId,
+      createdByUid: uid,
+      createdAt: FieldValue.serverTimestamp()
+    });
+
+    for (const recipient of notificationRefs) {
+      transaction.create(recipient.ref, {
+        type: "report",
+        title: "New attendance report",
+        message: title,
+        reportId: reportRef.id,
+        toUserId: recipient.uid,
+        toRole: "coo",
+        targetRole: "coo",
+        read: false,
+        createdAt: FieldValue.serverTimestamp()
+      });
+    }
+
+    transaction.update(sourceRef, {
+      status: "approved",
+      approvedBy: actorName,
+      approvedByUid: uid,
+      approvedAt: FieldValue.serverTimestamp(),
+      reportSentToCOO: true,
+      reportId: reportRef.id,
+      reportSentAt: FieldValue.serverTimestamp(),
+      notificationRecipients: notificationRefs.length
+    });
+  });
+
+  return {
+    ok: true,
+    reportId: reportRef.id,
+    notificationRecipients: recipientCount,
+    alreadySubmitted
+  };
+});
