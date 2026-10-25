@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef, Component } from "react";
+import { useState, useEffect, useRef, useCallback, Component } from "react";
 import { initializeApp, getApps } from "firebase/app";
 import {
   getFirestore, enableIndexedDbPersistence,
   doc, setDoc, getDoc, getDocs, addDoc,
-  updateDoc, deleteDoc, collection, query, where, orderBy,
+  updateDoc, collection, query, where, orderBy,
   onSnapshot, serverTimestamp, runTransaction
 } from "firebase/firestore";
 import { getStorage, ref as sRef, uploadBytes, getDownloadURL } from "firebase/storage";
@@ -458,7 +458,7 @@ function Badge({color=C.sage,children}){
 }
 function useToast(){
   const [t,setT]=useState(null);
-  const show=(m,k="ok")=>{setT({m,k});setTimeout(()=>setT(null),3200);};
+  const show=useCallback((m,k="ok")=>{setT({m,k});setTimeout(()=>setT(null),3200);},[]);
   const el=t?<div style={{position:"fixed",top:"16px",left:"50%",
     transform:"translateX(-50%)",
     background:{ok:C.ok,warn:C.warn,danger:C.danger}[t.k]||C.ok,
