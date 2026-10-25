@@ -157,20 +157,25 @@ service cloud.firestore {
     }
     match /reports/{id} {
       allow read: if isAdmin() || isHR() || isCOO();
-      allow create: if active() && (isAdmin() || isHR() || isRole('store_manager')) &&
-        (request.resource.data.toRole == 'coo' || request.resource.data.targetRole == 'coo');
+      // Report creation and notification fan-out must run in the trusted server callable.
+      allow create: if false;
       allow update: if (isAdmin() || isCOO()) &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','reviewedBy','reviewedAt']);
       allow delete: if false;
     }
     match /notifications/{id} {
-      allow read: if active() &&
-        (resource.data.toUserId == request.auth.uid || resource.data.toRole == profile().role);
+      function canAccessNotification() {
+        return active() &&
+          ((resource.data.keys().hasAny(['toUserId']) &&
+            resource.data.toUserId == request.auth.uid) ||
+           (!resource.data.keys().hasAny(['toUserId']) &&
+            resource.data.toRole == profile().role));
+      }
+      allow read: if canAccessNotification();
       allow create: if active() &&
         (request.resource.data.toUserId == request.auth.uid ||
          request.resource.data.toRole == profile().role || isAdmin() || isHR() || isCOO());
-      allow update: if active() &&
-        (resource.data.toUserId == request.auth.uid || resource.data.toRole == profile().role) &&
+      allow update: if canAccessNotification() &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']) &&
         request.resource.data.read is bool;
       allow delete: if false;
