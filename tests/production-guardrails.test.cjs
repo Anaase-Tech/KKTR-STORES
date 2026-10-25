@@ -52,3 +52,53 @@ test("unsafe bootstrap script and build-bypass environment file are absent", () 
   assert.equal(fs.existsSync(path.join(root, "firebase_setup.js")), false);
   assert.equal(fs.existsSync(path.join(root, ".env")), false);
 });
+
+
+test("chat sync writes to stable message IDs and does not drop failed messages", () => {
+  const start = app.indexOf("const OFFLINE_CHAT_KEY");
+  const end = app.indexOf("// ─── OFFLINE STOCK QUEUE", start);
+  assert.ok(start >= 0 && end > start, "chat outbox section must exist");
+  const queue = app.slice(start, end);
+  assert.match(queue, /setDoc\(doc\(db,"chats",m\.thread,"messages",m\.id\)/);
+  assert.match(queue, /const failed=new Set\(\)/);
+  assert.match(queue, /Chat queue was not cleared/);
+  assert.doesNotMatch(queue, /await addDoc\(collection\(db, "chats"/);
+});
+
+test("lubricant transactions are not falsely reported as committed while offline", () => {
+  assert.doesNotMatch(app, /queueOffline\("transactions",txData\)/);
+  assert.doesNotMatch(app, /Issued offline — will sync|Restocked offline — will sync/);
+  assert.match(app, /Stock changes require a live connection to verify availability/);
+});
+
+test("offline stock queue persists stable IDs and retains failed writes", () => {
+  const start = app.indexOf("const OFFLINE_STOCK_KEY");
+  const end = app.indexOf("// Auto-sync when network returns", start);
+  assert.ok(start >= 0 && end > start, "stock outbox section must exist");
+  const queue = app.slice(start, end);
+  assert.match(queue, /setDoc\(doc\(db,"storeItems",item\.id\)/);
+  assert.match(queue, /const completed=new Set\(\)/);
+  assert.match(queue, /const failed=new Set\(\)/);
+  assert.match(queue, /if\(remaining\.length\) localStorage\.setItem/);
+});
+
+test("weekly chop-money submission includes approved days only and prevents duplicate week records", () => {
+  const start = app.indexOf("const submitWeekly=async()=>{");
+  const end = app.indexOf("const submitMonthly=async()=>{", start);
+  assert.ok(start >= 0 && end > start, "weekly submission handler must exist");
+  const weekly = app.slice(start, end);
+  assert.match(weekly, /if\(r\.status!=="approved"\) return/);
+  assert.match(weekly, /const submissionId=/);
+  assert.match(weekly, /await runTransaction\(db,async\(transaction\)/);
+  assert.match(weekly, /transaction\.set\(submissionRef/);
+  assert.match(weekly, /already exists for this week/);
+});
+
+test("chat component defines and renders its own access-control toast", () => {
+  const start = app.indexOf("function ChatThread(");
+  const end = app.indexOf("\nfunction ", start + 1);
+  const component = app.slice(start, end);
+  assert.match(component, /const \[toastEl,showToast\]=useToast\(\)/);
+  assert.match(component, /\{toastEl\}/);
+  assert.doesNotMatch(component, /showToast&&showToast/);
+});
