@@ -280,7 +280,8 @@ test("Storage receipt object rules match uploaded .jpg paths and receive emulato
   const securityTests = fs.readFileSync(path.join(root, "tests/security/rules.test.cjs"), "utf8");
   const workflow = fs.readFileSync(path.join(root, ".github/workflows/quality-gate.yml"), "utf8");
   assert.ok(storageRules.includes("match /receipts/{receiptObject}"));
-  assert.ok(storageRules.includes("receiptObject.split("));
+  assert.equal(storageRules.split("receiptObject.split('.jpg')[0]").length - 1, 3);
+  assert.equal(storageRules.includes("split('[.]jpg')"), false);
   assert.match(storageRules, /function isReceiptImage\(receiptObject\)/);
   assert.ok(app.includes("receipts/" + "$" + "{docRef.id}" + ".jpg"));
   assert.match(securityTests, /receipt image paths enforce department access/);
