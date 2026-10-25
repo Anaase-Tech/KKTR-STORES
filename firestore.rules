@@ -20,14 +20,17 @@ service cloud.firestore {
       return dept in ['Log Yard','Sawmill','Saw Shop','Workshop','Charcoal',
         'Kindry','Chainsaw','Security','Administration','HR'];
     }
-    function pairedStockChange(stockPath, transactionId) {
+    function pairedStockChange(stockPath, stockId, expectedType, transactionId) {
       let before = get(stockPath);
       let after = getAfter(stockPath);
       let txPath = /databases/$(database)/documents/transactions/$(transactionId);
       let tx = getAfter(txPath);
-      // A ledger ID may be used once only; otherwise an old issue could be replayed.
+      // Each fresh ledger ID can affect only its named item and type; this prevents
+      // one ledger entry from being replayed against multiple inventory records.
       return !exists(txPath) && before.exists() && after.exists() && tx.exists() &&
         after.data.lastTransactionId == transactionId &&
+        tx.data.itemId == stockId &&
+        tx.data.type == expectedType &&
         tx.data.qty is number && tx.data.qty > 0 &&
         ((tx.data.action == 'issue' &&
           after.data.currentStock == before.data.currentStock - tx.data.qty) ||
@@ -40,7 +43,7 @@ service cloud.firestore {
         request.resource.data.currentStock is number && request.resource.data.currentStock >= 0 &&
         request.resource.data.lastTransactionId is string &&
         pairedStockChange(/databases/$(database)/documents/lubricants/$(id),
-          request.resource.data.lastTransactionId);
+          id, 'lube', request.resource.data.lastTransactionId);
     }
     function validStoreUpdate(id) {
       return isStores() &&
@@ -48,7 +51,7 @@ service cloud.firestore {
         request.resource.data.currentStock is number && request.resource.data.currentStock >= 0 &&
         request.resource.data.lastTransactionId is string &&
         pairedStockChange(/databases/$(database)/documents/storeItems/$(id),
-          request.resource.data.lastTransactionId);
+          id, 'store', request.resource.data.lastTransactionId);
     }
 
     match /users/{username} {
@@ -127,9 +130,11 @@ service cloud.firestore {
         request.resource.data.action in ['issue','restock'] &&
         request.resource.data.qty is number && request.resource.data.qty > 0 &&
         ((request.resource.data.type == 'lube' &&
-          pairedStockChange(/databases/$(database)/documents/lubricants/$(request.resource.data.itemId), id)) ||
+          pairedStockChange(/databases/$(database)/documents/lubricants/$(request.resource.data.itemId),
+            request.resource.data.itemId, 'lube', id)) ||
          (request.resource.data.type == 'store' &&
-          pairedStockChange(/databases/$(database)/documents/storeItems/$(request.resource.data.itemId), id)));
+          pairedStockChange(/databases/$(database)/documents/storeItems/$(request.resource.data.itemId),
+            request.resource.data.itemId, 'store', id)));
       allow update, delete: if false;
     }
     match /requisitions/{id} {
