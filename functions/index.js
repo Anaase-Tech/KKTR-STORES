@@ -590,18 +590,23 @@ exports.submitReportToCOO = onCall({ maxInstances: 5 }, async request => {
 
   const data = request.data || {};
   const type = cleanText(data.type, 30);
-  const title = cleanText(data.title, 180);
+  const rawTitle = typeof data.title === "string" ? data.title.trim() : "";
+  const title = rawTitle;
   const body = typeof data.body === "string" ? data.body : "";
-  const period = cleanText(data.period, 100);
-  const dept = cleanText(data.dept, 100) ||
+  const rawPeriod = data.period === undefined || data.period === null
+    ? "" : (typeof data.period === "string" ? data.period.trim() : null);
+  if (rawPeriod === null) fail("invalid-argument", "The report period must be text.");
+  const period = rawPeriod;
+  const rawDept = data.dept === undefined || data.dept === null
+    ? "" : (typeof data.dept === "string" ? data.dept.trim() : null);
+  if (rawDept === null) fail("invalid-argument", "The report department must be text.");
+  const dept = cleanText(rawDept, 100) ||
     (profile.role === "hr" ? "HR" : profile.role === "coo" ? "Administration" : "Stores");
   const allowedTypes = new Set(["general", "attendance", "chop", "stores"]);
   if (!allowedTypes.has(type)) fail("invalid-argument", "The report type is not supported.");
   if (!title || title.length > 180) fail("invalid-argument", "A report title of 1–180 characters is required.");
   if (body.length > 100000) fail("invalid-argument", "Report body exceeds the 100,000-character limit.");
-  if (typeof data.period === "string" && data.period.length > 100) {
-    fail("invalid-argument", "The report period must be 100 characters or fewer.");
-  }
+  if (period.length > 100) fail("invalid-argument", "The report period must be 100 characters or fewer.");
   if (!dept || dept.length > 100) fail("invalid-argument", "A valid report department is required.");
 
   let summary = {};
@@ -733,11 +738,14 @@ exports.approveAttendanceReportAndSendToCOO = onCall({ maxInstances: 5 }, async 
     if (!Array.isArray(source.summary)) {
       fail("failed-precondition", "The attendance report has no valid worker summary.");
     }
+    if (source.summary.length > 2000) {
+      fail("resource-exhausted", "The attendance report exceeds the safe worker-summary limit.");
+    }
     if (source.status !== "pending" && source.status !== "approved") {
       fail("failed-precondition", "Only a pending or previously approved attendance report can be filed with the COO.");
     }
 
-    const rows = source.summary.slice(0, 2000).map(row => ({
+    const rows = source.summary.map(row => ({
       name: cleanText(row && row.name, 100) || "Unnamed worker",
       present: Number.isFinite(Number(row && row.present)) ? Number(row.present) : 0,
       absent: Number.isFinite(Number(row && row.absent)) ? Number(row.absent) : 0,
