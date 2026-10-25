@@ -4638,12 +4638,18 @@ function AppInner(){
           setUser(data);
         }
       }catch(error){
-        if(active&&cachedMatches){
-          // Offline access requires an existing Firebase Auth session and its matching
-          // cached profile; browser-stored passwords are never accepted as authentication.
+        const networkUnavailable=!navigator.onLine ||
+          ["unavailable","deadline-exceeded"].includes(String(error?.code||""));
+        if(active&&cachedMatches&&networkUnavailable){
+          // Offline access requires a persisted Firebase Auth session and a matching
+          // cached profile. Authorization failures never fall back to cached access.
           setUser(cached);
         }else if(active){
+          Sess.clear();
           setUser(null);
+          if(["permission-denied","unauthenticated"].includes(String(error?.code||""))){
+            await signOut(auth).catch(()=>{});
+          }
         }
       }finally{
         if(active) setAuthReady(true);
