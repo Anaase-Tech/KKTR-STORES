@@ -69,8 +69,13 @@ test("COO report delivery uses a consistent schema and does not claim failed wri
   const cooStart = app.indexOf("function COOHRReport(");
   const cooEnd = app.indexOf("\nfunction ", cooStart + 1);
   const coo = app.slice(cooStart, cooEnd < 0 ? app.length : cooEnd);
-  assert.ok(coo.includes('where(collection(db,"reports"),where("targetRole","==","coo"))'));
+  assert.match(coo, /onSnapshot\(collection\(db,"reports"\)/);
+  assert.match(coo, /r\.targetRole==="coo"\|\|r\.toRole==="coo"/);
   assert.match(coo, /detail\.body\|\|detail\.text\|\|detail\.reportText/);
+  const dashboardStart = app.indexOf("function COODashboard(");
+  const dashboardEnd = app.indexOf("\\nfunction ", dashboardStart + 1);
+  const dashboard = app.slice(dashboardStart, dashboardEnd < 0 ? app.length : dashboardEnd);
+  assert.match(dashboard, /r\.targetRole==="coo"\|\|r\.toRole==="coo"/);
   assert.doesNotMatch(app, /233XXXXXXXXX|coo@kktr\.com/);
   assert.match(app, /delivery is unavailable until an authorized administrator configures and verifies/);
 });
