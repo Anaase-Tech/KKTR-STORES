@@ -176,5 +176,5 @@ test("factory reset cannot directly delete production records from the browser",
   const settingsEnd = app.indexOf("// ─── ERROR BOUNDARY", settingsStart);
   const settings = app.slice(settingsStart, settingsEnd);
   assert.match(settings, /Factory reset is disabled/);
-  assert.doesNotMatch(settings, /for\\(const col of \\["transactions","requisitions","receipts","chopMoney"/);
+  assert.equal(settings.includes('"attendanceReports","attendance","passwordResets",'), false);
 });
