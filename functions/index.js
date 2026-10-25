@@ -592,7 +592,9 @@ exports.submitReportToCOO = onCall({ maxInstances: 5 }, async request => {
   const type = cleanText(data.type, 30);
   const rawTitle = typeof data.title === "string" ? data.title.trim() : "";
   const title = rawTitle;
-  const body = typeof data.body === "string" ? data.body : "";
+  const body = data.body === undefined || data.body === null
+    ? "" : (typeof data.body === "string" ? data.body : null);
+  if (body === null) fail("invalid-argument", "The report body must be text.");
   const rawPeriod = data.period === undefined || data.period === null
     ? "" : (typeof data.period === "string" ? data.period.trim() : null);
   if (rawPeriod === null) fail("invalid-argument", "The report period must be text.");
@@ -600,7 +602,8 @@ exports.submitReportToCOO = onCall({ maxInstances: 5 }, async request => {
   const rawDept = data.dept === undefined || data.dept === null
     ? "" : (typeof data.dept === "string" ? data.dept.trim() : null);
   if (rawDept === null) fail("invalid-argument", "The report department must be text.");
-  const dept = cleanText(rawDept, 100) ||
+  if (rawDept.length > 100) fail("invalid-argument", "The report department must be 100 characters or fewer.");
+  const dept = rawDept ||
     (profile.role === "hr" ? "HR" : profile.role === "coo" ? "Administration" : "Stores");
   const allowedTypes = new Set(["general", "attendance", "chop", "stores"]);
   if (!allowedTypes.has(type)) fail("invalid-argument", "The report type is not supported.");
