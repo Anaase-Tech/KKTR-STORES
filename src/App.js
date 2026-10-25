@@ -4,10 +4,11 @@ import {
   getFirestore, enableIndexedDbPersistence,
   doc, setDoc, getDoc, getDocs, addDoc,
   updateDoc, deleteDoc, collection, query, where, orderBy,
-  onSnapshot, serverTimestamp, enableNetwork, runTransaction, increment
+  onSnapshot, serverTimestamp, runTransaction
 } from "firebase/firestore";
-import { getDatabase, ref, push, onValue, off, update } from "firebase/database";
 import { getStorage, ref as sRef, uploadBytes, getDownloadURL } from "firebase/storage";
+import { getAuth, onAuthStateChanged, signInWithCustomToken, signOut } from "firebase/auth";
+import { getFunctions, httpsCallable } from "firebase/functions";
 
 // ─── FIREBASE v7.0 — PROVEN WORKING CONFIG ───────────────────────────────────
 const firebaseConfig = {
@@ -22,17 +23,6 @@ const firebaseConfig = {
 
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
 
-// ─── PUSH NOTIFICATION FOUNDATION v9.6 ───────────────────────────────────────
-async function requestPushPermission(){
-  try{
-    if(!("Notification" in window)) return;
-    const permission = await Notification.requestPermission();
-    if(permission === "granted") console.log("Push permission granted");
-  }catch(e){ console.log("Push permission error:", e); }
-}
-
-
-
 // ─── OFFLINE-FIRST FIRESTORE (v9.2 — Firebase v9 compatible) ─────────────────
 // enableIndexedDbPersistence works in Firebase v9 modular SDK
 // Must be called immediately after getFirestore, before any reads/writes
@@ -46,8 +36,10 @@ enableIndexedDbPersistence(db).catch(err => {
     console.log("[KKTR] Persistence: not supported on this browser");
   }
 });
-const rtdb = getDatabase(app);
 const storage = getStorage(app);
+const auth = getAuth(app);
+const functions = getFunctions(app, "us-central1");
+const callBackend = (name, data) => httpsCallable(functions, name)(data);
 
 // ─── IN-APP REPORT SYSTEM v9.6 ────────────────────────────────────────────────
 async function sendInAppReport({
@@ -87,13 +79,23 @@ async function sendInAppReport({
 }
 
 // ─── PDF EXPORT v9.6 ─────────────────────────────────────────────────────────
+function escapeHTML(value){
+  return String(value??"").replace(/[&<>"']/g, char => ({
+    "&":"&amp;",
+    "<":"&lt;",
+    ">":"&gt;",
+    '"':"&quot;",
+    "'":"&#39;"
+  }[char]));
+}
+
 function exportPDF(title,content){
   const win=window.open("","_blank");
   if(!win) return;
   win.document.write(`
     <html>
     <head>
-      <title>${title}</title>
+      <title>${escapeHTML(title)}</title>
       <style>
         body{ font-family:Arial; padding:24px; line-height:1.6; }
         h1{ color:#1a2e1a; }
@@ -101,8 +103,8 @@ function exportPDF(title,content){
       </style>
     </head>
     <body>
-      <h1>${title}</h1>
-      <pre>${content}</pre>
+      <h1>${escapeHTML(title)}</h1>
+      <pre>${escapeHTML(content)}</pre>
     </body>
     </html>
   `);
@@ -141,25 +143,68 @@ async function syncOfflineQueue() {
 // ─── OFFLINE CHAT QUEUE ───────────────────────────────────────────────────────
 const OFFLINE_CHAT_KEY = "kktr_offline_chat_queue";
 
-function queueOfflineChat(thread, payload) {
+function createQueueId(prefix="queue"){
   try {
-    const q = JSON.parse(localStorage.getItem(OFFLINE_CHAT_KEY) || "[]");
-    q.push({ thread, payload, time: Date.now() });
-    localStorage.setItem(OFFLINE_CHAT_KEY, JSON.stringify(q));
+    if(typeof crypto!=="undefined"&&typeof crypto.randomUUID==="function")
+      return prefix+"_"+crypto.randomUUID();
   } catch(e) {}
+  return prefix+"_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,12);
+}
+
+function queueOfflineChat(thread, payload, id) {
+  const q = JSON.parse(localStorage.getItem(OFFLINE_CHAT_KEY) || "[]");
+  const stableId=id||payload?.id||createQueueId("message");
+  if(!q.some(m=>m.id===stableId))
+    q.push({id:stableId,thread,payload,time:Date.now()});
+  localStorage.setItem(OFFLINE_CHAT_KEY, JSON.stringify(q));
+  return stableId;
 }
 
 async function syncOfflineChats() {
   try {
-    const q = JSON.parse(localStorage.getItem(OFFLINE_CHAT_KEY) || "[]");
-    if (!q.length) return;
+    if(!navigator.onLine) return;
+    const raw = JSON.parse(localStorage.getItem(OFFLINE_CHAT_KEY) || "[]");
+    if (!raw.length) return;
+
+    // Assign and persist stable IDs before attempting writes. Retrying a write
+    // targets the same Firestore document instead of creating duplicate messages.
+    const q=raw.map(m=>({...m,id:m.id||m.payload?.id||createQueueId("message")}));
+    localStorage.setItem(OFFLINE_CHAT_KEY,JSON.stringify(q));
+    const completed=new Set();
+    const failed=new Set();
+
     for (const m of q) {
       try {
-        await addDoc(collection(db, "chats", m.thread, "messages"), m.payload);
-      } catch(e) {}
+        const rawDate=m.payload?.createdAt;
+        const date=(typeof rawDate==="string"||typeof rawDate==="number")
+          ?new Date(rawDate):new Date(m.time||Date.now());
+        const createdAt=Number.isNaN(date.getTime())?new Date(m.time||Date.now()):date;
+        const messageRef=doc(db,"chats",m.thread,"messages",m.id);
+        const existing=await getDoc(messageRef,{source:"server"});
+        if(!existing.exists()){
+          await setDoc(messageRef,{...m.payload,createdAt});
+        }
+        // A prior attempt may have committed even if the client missed the acknowledgement.
+        // Seeing the stable message ID on the server means it was delivered; do not reset its read flag.
+        completed.add(m.id);
+      } catch(e) {
+        failed.add(m.id);
+        console.error("[KKTR] Chat sync failed; message kept queued:",e?.message||e);
+      }
     }
-    localStorage.removeItem(OFFLINE_CHAT_KEY);
-  } catch(e) {}
+
+    // Remove only successfully written IDs from the latest queue snapshot.
+    // Messages added while this function awaited Firestore remain queued.
+    const latest=JSON.parse(localStorage.getItem(OFFLINE_CHAT_KEY)||"[]");
+    const remaining=latest.filter(m=>{
+      const id=m.id||m.payload?.id;
+      return !completed.has(id)||failed.has(id);
+    });
+    if(remaining.length) localStorage.setItem(OFFLINE_CHAT_KEY,JSON.stringify(remaining));
+    else localStorage.removeItem(OFFLINE_CHAT_KEY);
+  } catch(e) {
+    console.error("[KKTR] Chat queue was not cleared:",e?.message||e);
+  }
 }
 
 // ─── OFFLINE STOCK QUEUE v9.6 ────────────────────────────────────────────────
@@ -167,42 +212,84 @@ const OFFLINE_STOCK_KEY = "kktr_stock_queue";
 const STOCK_QUEUE_KEY   = "kktr_stock_queue_v96";
 
 function queueOfflineStock(payload) {
-  try {
-    const q = JSON.parse(localStorage.getItem(OFFLINE_STOCK_KEY) || "[]");
-    q.push({ payload, time: Date.now() });
-    localStorage.setItem(OFFLINE_STOCK_KEY, JSON.stringify(q));
-  } catch(e) {}
-}
-
-function queueStockOperation(op){
-  try{
-    const q=JSON.parse(localStorage.getItem(STOCK_QUEUE_KEY)||"[]");
-    q.push({...op, queuedAt:Date.now()});
-    localStorage.setItem(STOCK_QUEUE_KEY,JSON.stringify(q));
-  }catch(e){}
+  const q=JSON.parse(localStorage.getItem(OFFLINE_STOCK_KEY)||"[]");
+  const id=createQueueId("stock-item");
+  // JSON storage cannot preserve Firestore FieldValue sentinels; use a plain ISO
+  // timestamp and restore it to a Date when synchronizing.
+  q.push({id,payload:{...payload,createdAt:new Date().toISOString()},time:Date.now()});
+  localStorage.setItem(OFFLINE_STOCK_KEY,JSON.stringify(q));
+  return id;
 }
 
 async function syncOfflineStock() {
   try {
     if(!navigator.onLine) return;
-    // Sync storeItems queue
-    const q = JSON.parse(localStorage.getItem(OFFLINE_STOCK_KEY) || "[]");
-    if (q.length) {
-      for (const item of q) {
-        try { await addDoc(collection(db, "storeItems"), item.payload); } catch(e) {}
+
+    const rawItems=JSON.parse(localStorage.getItem(OFFLINE_STOCK_KEY)||"[]");
+    if(rawItems.length){
+      const items=rawItems.map(item=>({...item,id:item.id||createQueueId("stock-item")}));
+      localStorage.setItem(OFFLINE_STOCK_KEY,JSON.stringify(items));
+      const completed=new Set();
+      const failed=new Set();
+      for(const item of items){
+        try{
+          const d=new Date(item.payload?.createdAt||item.time||Date.now());
+          const itemRef=doc(db,"storeItems",item.id);
+          const existing=await getDoc(itemRef,{source:"server"});
+          if(existing.exists()){
+            const existingData=existing.data();
+            const sameRequest=existingData.name===item.payload?.name &&
+              existingData.dept===item.payload?.dept &&
+              existingData.createdAt?.toMillis?.()===(Number.isNaN(d.getTime())?new Date(item.time||Date.now()):d).getTime();
+            if(!sameRequest) throw new Error("An item with this queued ID already exists with different data.");
+          }else{
+            await setDoc(itemRef,{
+              ...item.payload,
+              createdAt:Number.isNaN(d.getTime())?new Date(item.time||Date.now()):d
+            });
+          }
+          completed.add(item.id);
+        }catch(e){
+          failed.add(item.id);
+          console.error("[KKTR] Stock-item sync failed; item kept queued:",e?.message||e);
+        }
       }
-      localStorage.removeItem(OFFLINE_STOCK_KEY);
+      const latest=JSON.parse(localStorage.getItem(OFFLINE_STOCK_KEY)||"[]");
+      const remaining=latest.filter(item=>{
+        const id=item.id||item.payload?.id;
+        return !completed.has(id)||failed.has(id);
+      });
+      if(remaining.length) localStorage.setItem(OFFLINE_STOCK_KEY,JSON.stringify(remaining));
+      else localStorage.removeItem(OFFLINE_STOCK_KEY);
     }
-    // Sync transactions queue (v9.6)
-    const q2=JSON.parse(localStorage.getItem(STOCK_QUEUE_KEY)||"[]");
-    if(q2.length){
-      for(const item of q2){
-        try { await addDoc(collection(db,"transactions"),item); } catch(e) {}
+
+    const rawTransactions=JSON.parse(localStorage.getItem(STOCK_QUEUE_KEY)||"[]");
+    if(rawTransactions.length){
+      const transactions=rawTransactions.map(item=>({...item,id:item.id||createQueueId("stock-tx")}));
+      localStorage.setItem(STOCK_QUEUE_KEY,JSON.stringify(transactions));
+      const completed=new Set();
+      const failed=new Set();
+      for(const item of transactions){
+        try{
+          const {id,queuedAt,...data}=item;
+          await setDoc(doc(db,"transactions",id),data);
+          completed.add(id);
+        }catch(e){
+          failed.add(item.id);
+          console.error("[KKTR] Stock-ledger sync failed; entry kept queued:",e?.message||e);
+        }
       }
-      localStorage.removeItem(STOCK_QUEUE_KEY);
-      console.log("Stock queue synced");
+      const latest=JSON.parse(localStorage.getItem(STOCK_QUEUE_KEY)||"[]");
+      const remaining=latest.filter(item=>{
+        const id=item.id;
+        return !completed.has(id)||failed.has(id);
+      });
+      if(remaining.length) localStorage.setItem(STOCK_QUEUE_KEY,JSON.stringify(remaining));
+      else localStorage.removeItem(STOCK_QUEUE_KEY);
     }
-  } catch(e) { console.log("syncOfflineStock error:",e); }
+  } catch(e) {
+    console.error("[KKTR] Stock queue sync was not cleared:",e?.message||e);
+  }
 }
 
 // Auto-sync when network returns
@@ -222,26 +309,9 @@ setInterval(() => {
 const DEPTS = ["Log Yard","Sawmill","Saw Shop","Workshop","Charcoal","Kindry",
                "Chainsaw","Security","Administration","HR"];
 const CHOP_RATE = 10;
-const ADMIN_USER = "abraham.sackey";
-// ADMIN_PASS removed from code — hash stored in Firestore only
 
 // Safe name helper — prevents crash if user.name is undefined
 const getFirstName = u => (u?.name||u?.username||"User").split(" ")[0];
-
-// ─── ROLE-BASED PERMISSIONS ───────────────────────────────────────────────────
-const PERMISSIONS = {
-  admin:         ["all"],
-  coo:           ["reqs_approve_coo","reqs_create","chat","reports"],
-  store_manager: ["lubes_read","lubes_write","items_read","items_write",
-                  "transactions","issue_stock","receipts","reports","chat","reqs_view"],
-  hr:            ["attendance","chop_money","staff_management","chat","reqs_create","reqs_view"],
-  dept:          ["reqs_create","reqs_view","chat","attendance","receipts"]
-};
-function can(user, perm){
-  if(!user||!user.role) return false;
-  const perms = PERMISSIONS[user.role] || [];
-  return perms.includes("all") || perms.includes(perm);
-}
 
 const C = {
   forest:"#1a2e1a", bark:"#3d2b1f", timber:"#8B5E3C", gold:"#C8951A",
@@ -263,32 +333,32 @@ const SK = "kktr_v7";
 const Sess = {
   save: u => {
     try{
-      // Always ensure name exists before saving
-      const safe={...u, name:u.name||u.username||"User"};
+      if(!u||!u.username||!u.id) return;
+      // Cache a non-secret profile only. Passwords/reset material never belong in browser storage.
+      const safe={...u,name:u.name||u.username||"User"};
+      delete safe.pwdHash;
+      delete safe.passwordHash;
+      delete safe.pendingPasswordReset;
       localStorage.setItem(SK,JSON.stringify(safe));
-    }catch{}
+    }catch(e){ console.warn("[KKTR] Session profile could not be cached."); }
   },
-  load: ()  => {
+  load: () => {
     try{
       const v=localStorage.getItem(SK);
       if(!v) return null;
       const u=JSON.parse(v);
-      // Ensure name field always exists on load
+      if(!u||typeof u!=="object"||!u.username||!u.id) return null;
+      delete u.pwdHash;
+      delete u.passwordHash;
+      delete u.pendingPasswordReset;
       if(!u.name) u.name=u.username||"User";
       return u;
     }catch{return null;}
   },
-  clear:()  => { try{ localStorage.removeItem(SK); }catch{} },
+  clear:() => { try{ localStorage.removeItem(SK); }catch{} },
 };
 
-// ─── PASSWORD HASH ────────────────────────────────────────────────────────────
-async function hashPwd(pwd) {
-  const buf = await crypto.subtle.digest("SHA-256",
-    new TextEncoder().encode(pwd + "kktr_salt_2024"));
-  return Array.from(new Uint8Array(buf))
-    .map(b => b.toString(16).padStart(2,"0")).join("");
-}
-
+// ─── NOTIFICATION HELPER
 // ─── NOTIFICATION HELPER ─────────────────────────────────────────────────────
 async function sendNotification(db, fromUser, toDept, toUserId, toUserName, type, message, extra={}){
   try {
@@ -448,13 +518,8 @@ function LoginScreen({onLogin,onRegister,onForgot}){
   const [logo,setLogo]=useState(null);
 
   useEffect(()=>{
-    // Unregister any old service workers
-    if("serviceWorker" in navigator){
-      navigator.serviceWorker.getRegistrations().then(regs=>{
-        regs.forEach(r=>r.unregister());
-      });
-    }
-    // Load logo
+    // Load the company logo. The service worker is registered by public/index.html
+    // and must remain registered for the installed PWA/offline app shell.
     getDoc(doc(db,"settings","company"))
       .then(s=>{ if(s.exists()&&s.data().logoUrl) setLogo(s.data().logoUrl); })
       .catch(()=>{});
@@ -464,67 +529,33 @@ function LoginScreen({onLogin,onRegister,onForgot}){
     const uname=u.trim().toLowerCase();
     if(!uname||!p){ setErr("Enter your username and password."); return; }
     setLoading(true); setErr("");
-
-    // 1. Check local cache first — instant, zero network
-    const cached=Sess.load();
-    if(cached&&cached.username===uname){
-      try {
-        const pwdHash=await hashPwd(p);
-        if(cached.pwdHash===pwdHash){ onLogin(cached); return; }
-        setErr("Wrong password."); setLoading(false); return;
-      } catch(e2){}
-    }
-
-    // 2. Firestore lookup — username is document ID, O(1) read
     try {
-      const pwdHash=await hashPwd(p);
-      const snap=await getDoc(doc(db,"users",uname));
-
-      if(!snap.exists()){
-        // Admin not in Firestore yet — deploy script should have created it
-        // If still missing, the password itself becomes the hash (first-time setup)
-        if(uname===ADMIN_USER){
-          const adminDoc={id:ADMIN_USER,username:ADMIN_USER,name:"Abraham Sackey",
-            dept:"Administration",role:"admin",approved:true,
-            pwdHash:pwdHash,createdAt:serverTimestamp()};
-          await setDoc(doc(db,"users",ADMIN_USER),adminDoc);
-          Sess.save(adminDoc); onLogin(adminDoc); return;
-        }
-        setErr("Wrong username or password."); setLoading(false); return;
+      // Password verification happens server-side. Legacy SHA-256 credentials are
+      // upgraded to scrypt only after a successful password check.
+      const response=await callBackend("authenticateUser",{username:uname,password:p});
+      const payload=response?.data||{};
+      if(!payload.token||!payload.profile||payload.profile.username!==uname){
+        throw new Error("The authentication service returned an invalid response.");
       }
-
-      const data={...snap.data(),id:snap.id};
-      if(!data.approved&&data.role!=="admin"){
-        setErr("Account awaiting approval from Abraham Sackey.");
-        setLoading(false); return;
-      }
-      if(data.pwdHash!==pwdHash){
-        if(data.pendingPasswordReset){
-          const rHash=await hashPwd(data.pendingPasswordReset);
-          if(pwdHash===rHash){
-            await setDoc(doc(db,"users",uname),
-              {...data,pwdHash:rHash,pendingPasswordReset:null},{merge:true});
-            const upd={...data,pwdHash:rHash,pendingPasswordReset:null};
-            Sess.save(upd); onLogin(upd); return;
-          }
-        }
-        setErr("Wrong password."); setLoading(false); return;
-      }
-      // Format display name properly — mutate property, not reassign const
-      if(!data.name || data.name === data.username) {
-        if(data.username && data.username.includes(".")) {
-          const parts = data.username.split(".");
-          const formatted = parts.map(pt => pt.charAt(0).toUpperCase()+pt.slice(1)).join(" ");
-          data.name = formatted;
-          setDoc(doc(db,"users",uname),{name:formatted},{merge:true}).catch(()=>{});
-        }
-      }
-      Sess.save(data); onLogin(data);
+      await signInWithCustomToken(auth,payload.token);
+      Sess.save(payload.profile);
+      onLogin(payload.profile);
+      setP("");
     } catch(e){
-      console.error("Login error:",e);
-      const cached2=Sess.load();
-      if(cached2&&cached2.username===uname){ onLogin(cached2); return; }
-      setErr("Error: "+e.message+(e.code?" ("+e.code+")":""));
+      console.error("[KKTR] Authentication request failed:",e?.code||"unknown");
+      const code=String(e?.code||"");
+      if(code==="functions/permission-denied"){
+        setErr(e.message||"This account is awaiting approval or has been disabled.");
+      }else if(code==="functions/resource-exhausted"){
+        setErr("Too many sign-in attempts. Wait before trying again.");
+      }else if(code==="functions/unavailable"||!navigator.onLine){
+        setErr("A connection to the sign-in service is required for a new sign-in. An existing authenticated session can be restored offline.");
+      }else if(code==="functions/unauthenticated"){
+        setErr("Invalid username or password.");
+      }else{
+        setErr("Sign-in could not be completed. Please retry or contact the system administrator.");
+      }
+    } finally {
       setLoading(false);
     }
   };
@@ -589,22 +620,21 @@ function RegisterScreen({onBack}){
     if(!f.name||!f.dept||!f.username||!f.password)
       return showToast("All fields required","warn");
     if(f.password!==f.confirm) return showToast("Passwords don't match","warn");
-    if(f.password.length<6) return showToast("Password min 6 characters","warn");
+    if(f.password.length<12) return showToast("Password must contain at least 12 characters","warn");
     const uname=f.username.trim().toLowerCase();
     setLoading(true);
     try {
-      const existing=await getDoc(doc(db,"users",uname));
-      if(existing.exists()){
-        showToast("Username already taken","danger"); setLoading(false); return;
-      }
-      const pwdHash=await hashPwd(f.password);
-      await setDoc(doc(db,"users",uname),{
-        id:uname,username:uname,name:f.name,dept:f.dept,
-        role:"dept",approved:false,pwdHash,createdAt:serverTimestamp()
+      await callBackend("registerDepartmentHead",{
+        username:uname,name:f.name.trim(),dept:f.dept,password:f.password
       });
-      showToast("✅ Registered! Waiting for admin approval.");
+      showToast("Registration submitted. The administrator must approve the account before sign-in.");
       setTimeout(onBack,2500);
-    } catch(e){ showToast("Failed: "+e.message,"danger"); setLoading(false); }
+    } catch(e){
+      const message=e?.code==="functions/already-exists"
+        ?"That username is already registered."
+        :e?.message||"Registration could not be completed.";
+      showToast(message,"danger");
+    } finally { setLoading(false); }
   };
   return(
     <div style={{minHeight:"100vh",
@@ -629,7 +659,7 @@ function RegisterScreen({onBack}){
           onChange={e=>ff("username",e.target.value)}
           placeholder="firstname.lastname" autoCapitalize="none"/>
         <Inp label="Password *" type="password" value={f.password}
-          onChange={e=>ff("password",e.target.value)} placeholder="Min 6 characters"/>
+          onChange={e=>ff("password",e.target.value)} placeholder="Minimum 12 characters"/>
         <Inp label="Confirm Password *" type="password" value={f.confirm}
           onChange={e=>ff("confirm",e.target.value)}/>
         <Btn onClick={submit} loading={loading}
@@ -653,16 +683,12 @@ function ForgotScreen({onBack}){
     setLoading(true);
     const uname=username.trim().toLowerCase();
     try {
-      const snap=await getDoc(doc(db,"users",uname));
-      if(!snap.exists()){ showToast("Username not found","danger"); setLoading(false); return; }
-      const data=snap.data();
-      await addDoc(collection(db,"passwordResets"),{
-        userId:uname,username:uname,name:data.name,dept:data.dept,
-        status:"pending",requestedAt:serverTimestamp()
-      });
+      // The server acknowledges identically whether the username exists or not.
+      await callBackend("requestPasswordReset",{username:uname});
       setSent(true);
-    } catch(e){ showToast("Failed: "+e.message,"danger"); }
-    setLoading(false);
+    } catch(e){
+      showToast("The request could not be submitted. Reconnect and try again.","danger");
+    } finally { setLoading(false); }
   };
   return(
     <div style={{minHeight:"100vh",
@@ -755,17 +781,23 @@ function Dashboard({user,onNav}){
     setLoading(true);
     try {
       const lubeRef=doc(db,"lubricants",qf.lubeId);
-      await runTransaction(db,async(tx)=>{
-        const snap=await tx.get(lubeRef);
-        if(!snap.exists()) throw new Error("Lubricant not found");
-        const current=snap.data().currentStock||0;
-        if(current<qty) throw new Error(`Not enough stock! Only ${current} ${snap.data().unit} left.`);
-        tx.update(lubeRef,{currentStock:increment(-qty)});
-      });
-      await addDoc(collection(db,"transactions"),{
+      const transactionRef=doc(collection(db,"transactions"));
+      const transactionData={
         type:"lube",action:"issue",itemId:qf.lubeId,itemName:lube.name,
         qty,unit:lube.unit,takenBy:qf.takenBy,equipment:qf.equipment||"",
         issuedBy:user?.name||"Unknown",date:today(),createdAt:serverTimestamp()
+      };
+      await runTransaction(db,async(tx)=>{
+        const snap=await tx.get(lubeRef);
+        if(!snap.exists()) throw new Error("Lubricant not found");
+        const current=Number(snap.data().currentStock)||0;
+        if(current<qty) throw new Error(`Not enough stock! Only ${current} ${snap.data().unit} left.`);
+        tx.update(lubeRef,{
+          currentStock:current-qty,
+          lastTransactionId:transactionRef.id,
+          updatedAt:serverTimestamp()
+        });
+        tx.set(transactionRef,transactionData);
       });
       showToast("✅ Issued!");
       setQf({lubeId:"",qty:"",takenBy:"",equipment:""});
@@ -878,7 +910,6 @@ function DeptDashboard({user,onNav}){
         setReqs(all);
       },()=>{});
     // v9.4: count unread from all 3 staff role threads for this dept
-    let totalUnread=0;
     const uChats=STAFF_ROLES.map(r=>{
       const tid=threadKey(user.dept,r);
       return onSnapshot(
@@ -1064,63 +1095,78 @@ function LubesModule({user}){
   const doTx=async(action)=>{
     if(!form.lubeId||!form.qty) return showToast("Select lubricant and enter quantity","warn");
     if(action==="issue"&&!form.takenBy) return showToast("Enter who is taking the lubricant","warn");
-    const qty=parseFloat(form.qty);
-    if(qty<=0||isNaN(qty)) return showToast("Invalid quantity","warn");
+    const qty=Number(form.qty);
+    if(!Number.isFinite(qty)||qty<=0) return showToast("Invalid quantity","warn");
     const lube=lubes.find(l=>l.id===form.lubeId);
     if(!lube) return;
     setLoading(true);
+    const transactionRef=doc(collection(db,"transactions"));
     const txData={
       type:"lube",action,itemId:form.lubeId,itemName:lube.name,
       qty,unit:lube.unit,takenBy:form.takenBy||"",
       equipment:form.equipment||"",desc:form.desc||"",
-      issuedBy:user?.name||"Unknown",date:today(),
-      createdAt:navigator.onLine?serverTimestamp():new Date().toISOString()
+      issuedBy:user?.name||user?.username||"Unknown",date:today(),
+      createdAt:serverTimestamp()
     };
     try {
       const lubeRef=doc(db,"lubricants",form.lubeId);
       await runTransaction(db,async(tx)=>{
         const snap=await tx.get(lubeRef);
         if(!snap.exists()) throw new Error("Lubricant not found");
-        const current=snap.data().currentStock||0;
-        if(action==="issue"&&current<qty)
-          throw new Error(`Not enough stock! Only ${current} ${snap.data().unit} left.`);
-        tx.update(lubeRef,{currentStock:increment(action==="restock"?qty:-qty)});
+        const current=Number(snap.data().currentStock)||0;
+        const next=current+(action==="restock"?qty:-qty);
+        if(next<0) throw new Error("Not enough stock. The current balance is "+current+" "+(snap.data().unit||"units")+".");
+        tx.update(lubeRef,{
+          currentStock:next,
+          lastTransactionId:transactionRef.id,
+          updatedAt:serverTimestamp()
+        });
+        tx.set(transactionRef,txData);
       });
-      await addDoc(collection(db,"transactions"),txData);
       showToast(action==="issue"?"✅ Issued!":"✅ Restocked!");
       setForm({lubeId:"",qty:"",takenBy:"",equipment:"",desc:""});
     } catch(e){
       if(!navigator.onLine){
-        // Save offline — Firestore persistence will sync the stock update
-        queueOffline("transactions",txData);
-        // Optimistic UI update on lubes list
-        setLubes(prev=>prev.map(l=>l.id===form.lubeId
-          ?{...l,currentStock:(l.currentStock||0)+(action==="restock"?qty:-qty)}
-          :l));
-        showToast(action==="issue"?"✅ Issued offline — will sync!":"✅ Restocked offline — will sync!");
-        setForm({lubeId:"",qty:"",takenBy:"",equipment:"",desc:""});
-      } else {
+        showToast("Stock changes require a live connection to commit the balance and ledger together. Reconnect and retry.","warn");
+      }else{
         showToast(e.message||"Failed","danger");
       }
-    }
-    setLoading(false);
+    } finally { setLoading(false); }
   };
 
   const deleteTx=async(tx)=>{
-    if(!window.confirm("Delete this transaction? Stock will be reversed.")) return;
-    try {
+    if(!window.confirm("Post a permanent reversal for this transaction? The original audit entry will be retained.")) return;
+    const reverseAction=tx.action==="issue"?"restock":"issue";
+    const reversalRef=doc(db,"transactions","reversal_"+tx.id);
+    try{
       const lubeRef=doc(db,"lubricants",tx.itemId);
       await runTransaction(db,async(t)=>{
-        const snap=await t.get(lubeRef);
-        if(snap.exists())
-          t.update(lubeRef,{currentStock:increment(tx.action==="issue"?tx.qty:-tx.qty)});
+        const [stockSnap,reversalSnap]=await Promise.all([t.get(lubeRef),t.get(reversalRef)]);
+        if(!stockSnap.exists()) throw new Error("Lubricant no longer exists.");
+        if(reversalSnap.exists()) throw new Error("This transaction has already been reversed.");
+        const current=Number(stockSnap.data().currentStock)||0;
+        const next=current+(reverseAction==="restock"?Number(tx.qty):-Number(tx.qty));
+        if(next<0) throw new Error("Cannot reverse this restock because the current balance is lower than the quantity being reversed.");
+        t.update(lubeRef,{
+          currentStock:next,
+          lastTransactionId:reversalRef.id,
+          updatedAt:serverTimestamp()
+        });
+        t.create(reversalRef,{
+          ...tx,
+          id:reversalRef.id,
+          action:reverseAction,
+          reversedBy:user?.name||user?.username||"Unknown",
+          reversalOf:tx.id,
+          reversalReason:"Reversal of transaction "+tx.id,
+          createdAt:serverTimestamp()
+        });
       });
-      await deleteDoc(doc(db,"transactions",tx.id));
-      showToast("Deleted and stock reversed.");
-    } catch(e){ showToast("Failed: "+e.message,"danger"); }
+      showToast("Reversal posted. The original audit record was retained.");
+    }catch(e){ showToast("Reversal failed: "+e.message,"danger"); }
   };
 
-  const ftx=txs.filter(t=>
+    const ftx=txs.filter(t=>
     (!fDept||t.dept===fDept)&&
     (!fFrom||tsToStr(t.createdAt)>=fFrom)&&
     (!fTo||tsToStr(t.createdAt)<=fTo));
@@ -1226,7 +1272,7 @@ function LubesModule({user}){
                   {user.role==="admin"&&(
                     <button onClick={()=>deleteTx(t)} style={{background:"none",
                       border:"none",color:C.danger,cursor:"pointer",fontSize:"0.72rem",fontWeight:700}}>
-                      🗑 Delete</button>
+                      ↩ Reverse</button>
                   )}
                 </div>
               </div>
@@ -1288,48 +1334,73 @@ function StoresModule({user}){
     if(!form.itemId||!form.qty) return showToast("Select item and enter quantity","warn");
     if(action==="issue"&&(!form.takenBy||!form.dept))
       return showToast("Taken-by and department required","warn");
-    const qty=parseFloat(form.qty);
-    if(qty<=0||isNaN(qty)) return showToast("Invalid quantity","warn");
+    const qty=Number(form.qty);
+    if(!Number.isFinite(qty)||qty<=0) return showToast("Invalid quantity","warn");
     const item=items.find(i=>i.id===form.itemId);
     if(!item) return;
     setLoading(true);
-    try {
+    const transactionRef=doc(collection(db,"transactions"));
+    const transactionData={
+      type:"store",action,itemId:form.itemId,itemName:item.name,
+      qty,unit:item.unit||"pcs",takenBy:form.takenBy||"",
+      dept:form.dept||"",desc:form.desc||"",
+      issuedBy:user?.name||user?.username||"Unknown",date:today(),
+      createdAt:serverTimestamp()
+    };
+    try{
       const itemRef=doc(db,"storeItems",form.itemId);
       await runTransaction(db,async(tx)=>{
         const snap=await tx.get(itemRef);
         if(!snap.exists()) throw new Error("Item not found");
-        const current=snap.data().currentStock||0;
-        if(action==="issue"&&current<qty)
-          throw new Error(`Not enough stock! Only ${current} ${snap.data().unit||"pcs"} left.`);
-        tx.update(itemRef,{currentStock:increment(action==="restock"?qty:-qty)});
-      });
-      await addDoc(collection(db,"transactions"),{
-        type:"store",action,itemId:form.itemId,itemName:item.name,
-        qty,unit:item.unit||"pcs",takenBy:form.takenBy||"",
-        dept:form.dept||"",desc:form.desc||"",
-        issuedBy:user?.name||"Unknown",date:today(),createdAt:serverTimestamp()
+        const current=Number(snap.data().currentStock)||0;
+        const next=current+(action==="restock"?qty:-qty);
+        if(next<0) throw new Error("Not enough stock. The current balance is "+current+" "+(snap.data().unit||"pcs")+".");
+        tx.update(itemRef,{
+          currentStock:next,
+          lastTransactionId:transactionRef.id,
+          updatedAt:serverTimestamp()
+        });
+        tx.set(transactionRef,transactionData);
       });
       showToast(action==="issue"?"✅ Issued!":"✅ Restocked!");
       setForm({itemId:"",qty:"",takenBy:"",dept:"",desc:""});
-    } catch(e){ showToast(e.message||"Failed","danger"); }
-    setLoading(false);
+    }catch(e){ showToast(e.message||"Failed","danger"); }
+    finally{ setLoading(false); }
   };
 
   const deleteTx=async(tx)=>{
-    if(!window.confirm("Delete? Stock will be reversed.")) return;
-    try {
+    if(!window.confirm("Post a permanent reversal for this transaction? The original audit entry will be retained.")) return;
+    const reverseAction=tx.action==="issue"?"restock":"issue";
+    const reversalRef=doc(db,"transactions","reversal_"+tx.id);
+    try{
       const itemRef=doc(db,"storeItems",tx.itemId);
       await runTransaction(db,async(t)=>{
-        const snap=await t.get(itemRef);
-        if(snap.exists())
-          t.update(itemRef,{currentStock:increment(tx.action==="issue"?tx.qty:-tx.qty)});
+        const [stockSnap,reversalSnap]=await Promise.all([t.get(itemRef),t.get(reversalRef)]);
+        if(!stockSnap.exists()) throw new Error("Stock item no longer exists.");
+        if(reversalSnap.exists()) throw new Error("This transaction has already been reversed.");
+        const current=Number(stockSnap.data().currentStock)||0;
+        const next=current+(reverseAction==="restock"?Number(tx.qty):-Number(tx.qty));
+        if(next<0) throw new Error("Cannot reverse this restock because the current balance is lower than the quantity being reversed.");
+        t.update(itemRef,{
+          currentStock:next,
+          lastTransactionId:reversalRef.id,
+          updatedAt:serverTimestamp()
+        });
+        t.create(reversalRef,{
+          ...tx,
+          id:reversalRef.id,
+          action:reverseAction,
+          reversedBy:user?.name||user?.username||"Unknown",
+          reversalOf:tx.id,
+          reversalReason:"Reversal of transaction "+tx.id,
+          createdAt:serverTimestamp()
+        });
       });
-      await deleteDoc(doc(db,"transactions",tx.id));
-      showToast("Deleted.");
-    } catch(e){ showToast("Failed: "+e.message,"danger"); }
+      showToast("Reversal posted. The original audit record was retained.");
+    }catch(e){ showToast("Reversal failed: "+e.message,"danger"); }
   };
 
-  const filtered=items.filter(i=>i.name.toLowerCase().includes(search.toLowerCase()));
+    const filtered=items.filter(i=>i.name.toLowerCase().includes(search.toLowerCase()));
 
   return(
     <div style={{padding:"0 12px 80px"}}>
@@ -1437,7 +1508,7 @@ function StoresModule({user}){
           };
           if(!navigator.onLine){
             queueOfflineStock(payload);
-            showToast("✅ Saved offline — syncs on reconnect","warn");
+            showToast("Item queued on this device. It will become available after the connection returns and synchronization succeeds.","warn");
             setModal(null);
             return;
           }
@@ -1480,7 +1551,6 @@ function ReqsModule({user}){
   // v8.4 STRICT ROLES — use user.role only, never dept for authority
   const isAdmin = user.role === "admin";
   const isCOO   = user.role === "coo";
-  const isHR    = user.role === "hr"; // v8.6 strict
 
   // ROUTING RULE:
   // Admin creates → approverRole:"coo" → COO approves
@@ -2088,8 +2158,6 @@ function DeptInbox({user}){
       myRole={dept}
       onBack={()=>setActiveRole(null)}/>;
 
-  const totalUnread=Object.values(unread).reduce((s,n)=>s+n,0);
-
   return(
     <div style={{padding:"0 12px 80px"}}>
       <div style={{paddingTop:"4px",marginBottom:"14px"}}>
@@ -2134,6 +2202,7 @@ function DeptInbox({user}){
 // threadId = e.g. "Chainsaw_admin"
 // myRole = "admin"|"hr"|"coo" for staff, or dept name for dept heads
 function ChatThread({threadId,label,user,myRole,onBack}){
+  const [toastEl,showToast]=useToast();
   const [msgs,setMsgs]=useState(()=>{
     try {
       const cached=localStorage.getItem(`kktr_chat_${threadId}`);
@@ -2171,33 +2240,51 @@ function ChatThread({threadId,label,user,myRole,onBack}){
     // BLOCK department-to-department direct chat
     const targetRole=threadRole(threadId)||"";
     if(user?.role==="dept" && !["admin","hr","coo"].includes(targetRole)){
-      showToast&&showToast("Departments cannot message each other directly","danger");
+      showToast("Departments cannot message each other directly","danger");
       return;
     }
 
     const text=input.trim();
     setInput("");
+    const messageId=createQueueId("message");
     const payload={
+      id:messageId,
       text,
       from:myRole,
       senderName:user?.name||user?.username||myRole,
       role:user.role,
       dept,
       read:false,
-      createdAt:serverTimestamp()
+      createdAt:new Date().toISOString()
     };
+    const optimistic={...payload,createdAt:new Date(payload.createdAt),id:messageId};
 
     if(!navigator.onLine){
-      queueOfflineChat(threadId, payload);
-      setMsgs(prev=>[...prev,{...payload,createdAt:Date.now(),offline:true,id:"_tmp_"+Date.now()}]);
+      try{
+        queueOfflineChat(threadId,payload,messageId);
+        setMsgs(prev=>[...prev, {...optimistic,offline:true}]);
+      }catch(e){
+        setInput(text);
+        showToast("Message could not be saved on this device. Please retry.","danger");
+      }
       return;
     }
 
-    setMsgs(prev=>[...prev,{...payload,createdAt:Date.now(),id:"_tmp_"+Date.now()}]);
-    try {
-      await addDoc(collection(db,"chats",threadId,"messages"),payload);
-    } catch(e){
-      queueOfflineChat(threadId, payload);
+    setMsgs(prev=>[...prev,optimistic]);
+    try{
+      await setDoc(doc(db,"chats",threadId,"messages",messageId),{
+        ...payload,createdAt:new Date(payload.createdAt)
+      });
+    }catch(e){
+      try{
+        queueOfflineChat(threadId,payload,messageId);
+        setMsgs(prev=>prev.map(m=>m.id===messageId?{...m,offline:true}:m));
+        showToast("Message saved locally; delivery is pending connection.","warn");
+      }catch(queueError){
+        setMsgs(prev=>prev.filter(m=>m.id!==messageId));
+        setInput(text);
+        showToast("Message was not sent and could not be queued. Reconnect and retry.","danger");
+      }
     }
   };
 
@@ -2210,6 +2297,7 @@ function ChatThread({threadId,label,user,myRole,onBack}){
 
   return(
     <div style={{display:"flex",flexDirection:"column",height:"calc(100vh - 116px)"}}>
+      {toastEl}
       {/* Header */}
       <div style={{padding:"10px 12px",
         background:`linear-gradient(90deg,${C.forest},${C.bark})`,
@@ -2355,6 +2443,8 @@ function AttendanceModule({user}){
         where("dept","==",dept),where("present","==",true)));
       const workerDays={};
       snap.docs.map(d=>d.data()).forEach(r=>{
+        // Chop money is calculated only from HR-approved present days.
+        if(r.status!=="approved") return;
         if(r.date>=wStart&&r.date<=today()){
           workerDays[r.workerId]={
             name:r.workerName,
@@ -2365,10 +2455,24 @@ function AttendanceModule({user}){
       const chopList=Object.entries(workerDays)
         .map(([id,{name,days}])=>({workerId:id,name,days,amount:days*CHOP_RATE}));
       const total=chopList.reduce((s,w)=>s+w.amount,0);
-      await addDoc(collection(db,"chopMoney"),{
-        dept,weekStart:wStart,weekEnd:today(),chopList,totalAmount:total,
-        submittedBy:user?.name||user?.username||"Unknown",
-        status:"pending",createdAt:serverTimestamp()
+      // Stable week key prevents a double-tap or two updated clients from
+      // creating multiple submissions for the same department/week.
+      const deptKey=String(dept||"unknown").normalize("NFKD")
+        .toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"")||"unknown";
+      const submissionId=`weekly-${deptKey}-${wStart}`;
+      const submissionRef=doc(db,"chopMoney",submissionId);
+      const legacy=await getDocs(query(collection(db,"chopMoney"),where("dept","==",dept)));
+      if(legacy.docs.some(d=>d.id!==submissionId&&d.data().weekStart===wStart)){
+        throw new Error("A weekly chop-money submission already exists for this week. Ask HR to reconcile the existing record before resubmitting.");
+      }
+      await runTransaction(db,async(transaction)=>{
+        const existing=await transaction.get(submissionRef);
+        if(existing.exists()) throw new Error("A weekly chop-money submission already exists for this week.");
+        transaction.set(submissionRef,{
+          dept,weekStart:wStart,weekEnd:today(),chopList,totalAmount:total,
+          submittedBy:user?.name||user?.username||"Unknown",
+          status:"pending",createdAt:serverTimestamp()
+        });
       });
       showToast(`✅ Chop money sent to HR!\nTotal: GH₵${total}`);
     } catch(e){ showToast("Failed: "+e.message,"danger"); }
@@ -2486,7 +2590,6 @@ function AttendanceModule({user}){
 // ─── HR MODULE ────────────────────────────────────────────────────────────────
 function HRModule({user}){
   const [tab,setTab]=useState("roster");
-  const isHR=user.role==="hr"; // v8.6 strict
   return(
     <div style={{padding:"0 12px 80px"}}>
       <div style={{fontWeight:800,fontSize:"1.2rem",color:C.forest,
@@ -2729,28 +2832,29 @@ function StaffRoster({user}){
       s=>setWorkers(s.docs.map(d=>({id:d.id,...d.data()}))));
   },[]);
   const add=async(f)=>{
-    if(!f.name||!f.dept) return showToast("Name and dept required","warn");
-    // Prevent duplicate workers — normalized nameKey check
-    const normalizedName=(f.name||"").trim().toLowerCase();
-    const existing=await getDocs(query(collection(db,"workers"),
-      where("nameKey","==",normalizedName)));
-    if(!existing.empty){
-      showToast("Worker already exists","danger");
-      return;
-    }
-    try {
-      await addDoc(collection(db,"workers"),{
-        nameKey:normalizedName,
-        name:f.name.trim(),dept:f.dept,type:f.type||"casual",
-        staffId:f.staffId||"",addedBy:user?.name||user?.username||"Unknown",
-        createdAt:serverTimestamp()
+    if(!f.name||!f.dept) return showToast("Name and department are required.","warn");
+    try{
+      await callBackend("addWorker",{
+        name:f.name,
+        dept:f.dept,
+        type:f.type||"casual",
+        staffId:f.staffId||""
       });
-      showToast("✅ Worker added!"); setModal(false);
-    } catch(e){ showToast("Failed: "+e.message,"danger"); }
+      showToast("Worker added successfully.");
+      setModal(false);
+    }catch(e){
+      const message=e?.code==="functions/already-exists"
+        ?"A worker with this name already exists."
+        :e?.message||"Worker could not be added.";
+      showToast(message,"danger");
+    }
   };
   const remove=async(id)=>{
-    if(!window.confirm("Remove this worker?")) return;
-    await deleteDoc(doc(db,"workers",id));
+    if(!window.confirm("Remove this worker? Historical attendance and chop-money records will be retained.")) return;
+    try{
+      await callBackend("deleteWorker",{workerId:id});
+      showToast("Worker removed. Historical records were retained.");
+    }catch(e){ showToast(e?.message||"Worker could not be removed.","danger"); }
   };
   const grouped=DEPTS.reduce((a,d)=>{a[d]=workers.filter(w=>w.dept===d);return a;},{});
   return(
@@ -3443,6 +3547,7 @@ function COOReqsReport({user,sigName,letterhead,shareReport}){
 function COOAttendReport({user,sigName,letterhead,shareReport}){
   const [reports,setReports]=useState([]);
   const [loading,setLoading]=useState(true);
+  const [attSubmitting,setAttSubmitting]=useState(false);
   useEffect(()=>{
     getDocs(collection(db,"attendanceReports"))
       .then(s=>{
@@ -3475,8 +3580,6 @@ function COOAttendReport({user,sigName,letterhead,shareReport}){
 
   if(loading) return <div style={{textAlign:"center",color:"#aaa",padding:"40px"}}>Loading…</div>;
 
-  const [attSubmitting,setAttSubmitting]=useState(false);
-
   const handleShareAndSubmit=async(via)=>{
     const reportText=buildText();
     const sh=shareReport(reportText,"COO Attendance Report");
@@ -3499,7 +3602,6 @@ function COOAttendReport({user,sigName,letterhead,shareReport}){
     }
   };
 
-  const sh=shareReport(buildText(),"COO Attendance Report");
   return(
     <div>
       {DEPTS.map(dept=>{
@@ -3711,7 +3813,7 @@ function COOHRReport({user,sigName,letterhead,shareReport}){
                 <div key={k} style={{display:"flex",justifyContent:"space-between",
                   padding:"3px 0",borderBottom:`1px dashed ${C.border}`}}>
                   <span style={{textTransform:"capitalize",color:C.timber}}>{k.replace(/([A-Z])/g," $1")}</span>
-                  <span style={{fontWeight:700}}>{typeof v==="number"&&k.toLowerCase().includes("chop")||k.toLowerCase().includes("total")?`GH₵${v}`:v}</span>
+                  <span style={{fontWeight:700}}>{(typeof v==="number"&&(k.toLowerCase().includes("chop")||k.toLowerCase().includes("total")))?`GH₵${v}`:v}</span>
                 </div>
               ))}
             </div>
@@ -3969,14 +4071,21 @@ function SettingsModule({user,onLogout,onInstall}){
   const [newPwd,setNewPwd]=useState("");
   const [myOldPwd,setMyOldPwd]=useState("");
   const [myNewPwd,setMyNewPwd]=useState("");
-  const [factoryPwd,setFactoryPwd]=useState("");
   const [loading,setLoading]=useState(false);
   const [logo,setLogo]=useState(null);
   const [logoLoading,setLogoLoading]=useState(false);
 
   useEffect(()=>{
     if(user.role!=="admin") return;
-    const uU=onSnapshot(collection(db,"users"),s=>setUsers(s.docs.map(d=>({id:d.id,...d.data()}))));
+    // Password hashes are private server-side records. Admins receive only the
+    // allow-listed account directory, which remains live via Firestore snapshots.
+    const uU=onSnapshot(collection(db,"accountDirectory"),
+      s=>setUsers(s.docs.map(d=>({id:d.id,...d.data()}))),
+      e=>showToast("Account list unavailable: "+e.message,"danger"));
+    callBackend("listAccounts",{}).catch(e=>{
+      console.error("[KKTR] Account directory bootstrap failed:",e?.code||"unknown");
+      showToast("Could not refresh the account directory. Check access and connection.","danger");
+    });
     const uP=onSnapshot(query(collection(db,"passwordResets"),where("status","==","pending")),
       s=>setPwdResets(s.docs.map(d=>({id:d.id,...d.data()}))));
     getDoc(doc(db,"settings","company"))
@@ -3985,53 +4094,42 @@ function SettingsModule({user,onLogout,onInstall}){
   },[user]);
 
   const approveUser=async(id)=>{
-    await updateDoc(doc(db,"users",id),{approved:true});
-    showToast("✅ Account approved!");
+    try{
+      await callBackend("approveDepartmentHead",{username:id});
+      showToast("Account approved.");
+    }catch(e){ showToast(e?.message||"Account approval failed.","danger"); }
   };
   const deleteUser=async(id,name)=>{
-    if(!window.confirm(`Delete account for ${name}?`)) return;
-    await deleteDoc(doc(db,"users",id));
-    showToast("Account deleted.");
+    if(!window.confirm("Delete account for "+name+"?")) return;
+    try{
+      await callBackend("deleteAccount",{username:id});
+      showToast("Account and sign-in credentials deleted. Historical business records are retained.");
+    }catch(e){ showToast(e?.message||"Account deletion failed.","danger"); }
   };
   const resetPwd=async(target)=>{
-    if(!newPwd||newPwd.length<6) return showToast("Min 6 characters","warn");
+    if(!newPwd||newPwd.length<12) return showToast("New password must contain at least 12 characters.","warn");
     setLoading(true);
-    try {
-      // Hash the new password before storing — never store plain text
-      const newHash=await hashPwd(newPwd);
-      await updateDoc(doc(db,"users",target.id),{
-        pwdHash:newHash,
-        pendingPasswordReset:null,
-        passwordResetBy:user?.name||user?.username||"Admin",
-        passwordResetAt:serverTimestamp()
-      });
-      const rSnap=await getDocs(query(collection(db,"passwordResets"),
-        where("userId","==",target.id),where("status","==","pending")));
-      for(const d of rSnap.docs)
-        await updateDoc(doc(db,"passwordResets",d.id),{status:"completed"});
-      showToast(`✅ Password for ${target.name||target.username} reset!`);
+    try{
+      await callBackend("resetUserPassword",{username:target.id,newPassword:newPwd});
+      showToast("Password reset completed. The account must sign in with the new password.");
       setResetTarget(null); setNewPwd("");
-    } catch(e){ showToast("Failed: "+e.message,"danger"); }
-    setLoading(false);
+    }catch(e){ showToast(e?.message||"Password reset failed.","danger"); }
+    finally{ setLoading(false); }
   };
+
   const changeMyPwd=async()=>{
     if(!myOldPwd||!myNewPwd) return showToast("Fill both fields","warn");
-    if(myNewPwd.length<6) return showToast("Min 6 characters","warn");
+    if(myNewPwd.length<12) return showToast("New password must contain at least 12 characters.","warn");
     setLoading(true);
-    try {
-      const oldHash=await hashPwd(myOldPwd);
-      const snap=await getDoc(doc(db,"users",user.username));
-      if(!snap.exists()||snap.data().pwdHash!==oldHash){
-        showToast("Current password is wrong","danger"); setLoading(false); return;
-      }
-      const newHash=await hashPwd(myNewPwd);
-      await updateDoc(doc(db,"users",user.username),{pwdHash:newHash});
-      Sess.save({...user,pwdHash:newHash});
-      showToast("✅ Password changed!");
+    try{
+      await callBackend("changeOwnPassword",{oldPassword:myOldPwd,newPassword:myNewPwd});
+      showToast("Password changed successfully.");
       setMyOldPwd(""); setMyNewPwd("");
-    } catch(e){ showToast("Failed: "+e.message,"danger"); }
-    setLoading(false);
+    }catch(e){
+      showToast(e?.code==="functions/unauthenticated"?"Current password is incorrect.":e?.message||"Password change failed.","danger");
+    }finally{ setLoading(false); }
   };
+
   const handleLogo=async(e)=>{
     const file=e.target.files[0]; if(!file) return;
     setLogoLoading(true);
@@ -4096,51 +4194,10 @@ function SettingsModule({user,onLogout,onInstall}){
     showToast("✅ Default lubricants added!");
   };
   const factoryReset=async()=>{
-    if(!factoryPwd){ showToast("Enter admin password","warn"); return; }
-    const hash=await hashPwd(factoryPwd);
-    const snap=await getDoc(doc(db,"users",ADMIN_USER));
-    if(!snap.exists()||snap.data().pwdHash!==hash){
-      showToast("Wrong admin password","danger"); return;
-    }
-    if(!window.confirm("⚠ Clear ALL transactions, requisitions, attendance and receipts?")) return;
-    setLoading(true);
-    try {
-      // Main collections
-      for(const col of ["transactions","requisitions","receipts","chopMoney",
-        "attendanceReports","attendance","passwordResets",
-        "notifications","requisitionHistory"]){
-        const s=await getDocs(collection(db,col));
-        for(const d of s.docs) await deleteDoc(doc(db,col,d.id));
-      }
-      // Clear chat threads — new format: {dept}_{role}
-      for(const dept of DEPTS){
-        for(const role of STAFF_ROLES){
-          try {
-            const tid=threadKey(dept,role);
-            const msgs=await getDocs(collection(db,"chats",tid,"messages"));
-            for(const d of msgs.docs) await deleteDoc(d.ref);
-          } catch(e2){}
-        }
-      }
-      showToast("✅ Factory reset complete.");
-      // Clear all stale local caches — v9.6 full cleanup
-      localStorage.removeItem("kktr_unread");
-      localStorage.removeItem("kktr_chat_cache");
-      localStorage.removeItem("kktr_threads");
-      localStorage.removeItem(OFFLINE_CHAT_KEY);
-      localStorage.removeItem(OFFLINE_STOCK_KEY);
-      localStorage.removeItem("kktr_stock_queue_v96");
-      localStorage.removeItem("kktr_offline_attendance");
-      localStorage.removeItem("kktr_pending_sync");
-      if (window.indexedDB) {
-        try { indexedDB.deleteDatabase("kktr-offline-db"); } catch(e2) {}
-      }
-      setFactoryPwd("");
-    } catch(e){ showToast("Failed: "+e.message,"danger"); }
-    setLoading(false);
+    showToast("Factory reset is disabled. Production records may only be removed through a reviewed backup, retention, and recovery procedure.","warn");
   };
 
-  const clearChats=async()=>{
+    const clearChats=async()=>{
     if(!window.confirm("Delete all chat messages from all departments?")) return;
     setLoading(true);
     try {
@@ -4205,7 +4262,7 @@ function SettingsModule({user,onLogout,onInstall}){
           <Inp label="Current Password *" type="password" value={myOldPwd}
             onChange={e=>setMyOldPwd(e.target.value)}/>
           <Inp label="New Password *" type="password" value={myNewPwd}
-            onChange={e=>setMyNewPwd(e.target.value)} placeholder="Min 6 characters"/>
+            onChange={e=>setMyNewPwd(e.target.value)} placeholder="Minimum 12 characters"/>
           <Btn onClick={changeMyPwd} loading={loading}
             style={{width:"100%",justifyContent:"center"}}>Change Password</Btn>
         </Card>
@@ -4225,7 +4282,7 @@ function SettingsModule({user,onLogout,onInstall}){
                   {resetTarget?.id===r.userId?(
                     <div style={{marginTop:"8px",display:"flex",gap:"6px"}}>
                       <input value={newPwd} onChange={e=>setNewPwd(e.target.value)}
-                        type="password" placeholder="New password (min 6)"
+                        type="password" placeholder="New password (minimum 12 characters)"
                         style={{flex:1,padding:"8px",border:`1.5px solid ${C.border}`,
                           borderRadius:"8px",fontFamily:"inherit",fontSize:"0.85rem"}}/>
                       <Btn sm onClick={()=>resetPwd(resetTarget)} color={C.ok} loading={loading}>Set</Btn>
@@ -4275,8 +4332,12 @@ function SettingsModule({user,onLogout,onInstall}){
                   <div style={{display:"flex",gap:"4px",flexWrap:"wrap",justifyContent:"flex-end"}}>
                     <select value={u.role||"dept"}
                       onChange={async(e)=>{
-                        await updateDoc(doc(db,"users",u.id),{role:e.target.value});
-                        showToast(`✅ Role updated to ${e.target.value}`);
+                        try{
+                          await callBackend("setAccountRole",{username:u.id,role:e.target.value});
+                          showToast("Role updated to "+e.target.value);
+                        }catch(error){
+                          showToast(error?.message||"Role update failed.","danger");
+                        }
                       }}
                       style={{padding:"4px 6px",border:`1px solid ${C.border}`,
                         borderRadius:"6px",fontFamily:"inherit",fontSize:"0.72rem",
@@ -4424,14 +4485,10 @@ function SettingsModule({user,onLogout,onInstall}){
           <Card style={{border:`1.5px solid ${C.danger}`}}>
             <div style={{fontWeight:800,color:C.danger,marginBottom:"8px"}}>⚠ Factory Reset</div>
             <div style={{fontSize:"0.82rem",color:"#888",marginBottom:"12px"}}>
-              Clears all transactions, requisitions, attendance and receipts.
-              Accounts and stock items are kept.</div>
-            <Inp type="password" value={factoryPwd}
-              onChange={e=>setFactoryPwd(e.target.value)}
-              placeholder="Enter admin password to confirm"/>
-            <Btn onClick={factoryReset} loading={loading} color={C.danger}
+              Destructive factory reset is disabled. Permanent data removal requires a verified backup, a documented retention decision, and a recoverable server-side operation.</div>
+            <Btn onClick={factoryReset} outline color={C.danger}
               style={{width:"100%",justifyContent:"center"}}>
-              Factory Reset (Irreversible)</Btn>
+              View safety restriction</Btn>
           </Card>
         </div>
       )}
@@ -4542,16 +4599,68 @@ export default function App(){
 }
 
 function AppInner(){
-  const [user,setUser]=useState(Sess.load);
+  const [user,setUser]=useState(null);
+  const [authReady,setAuthReady]=useState(false);
   const [tab,setTab]=useState("home");
   const [installPrompt,setInstallPrompt]=useState(null);
   const [showInstall,setShowInstall]=useState(false);
 
   useEffect(()=>{
     const handler=e=>{ e.preventDefault(); setInstallPrompt(e); setShowInstall(true); };
+    const installed=()=>setShowInstall(false);
     window.addEventListener("beforeinstallprompt",handler);
-    window.addEventListener("appinstalled",()=>setShowInstall(false));
-    return()=>window.removeEventListener("beforeinstallprompt",handler);
+    window.addEventListener("appinstalled",installed);
+    return()=>{
+      window.removeEventListener("beforeinstallprompt",handler);
+      window.removeEventListener("appinstalled",installed);
+    };
+  },[]);
+
+  useEffect(()=>{
+    let active=true;
+    const unsubscribe=onAuthStateChanged(auth,async firebaseUser=>{
+      if(!active) return;
+      if(!firebaseUser){
+        Sess.clear();
+        setUser(null);
+        setAuthReady(true);
+        return;
+      }
+      const cached=Sess.load();
+      const cachedMatches=!!cached&&(cached.id===firebaseUser.uid||cached.username===firebaseUser.uid);
+      if(!navigator.onLine&&cachedMatches){
+        setUser(cached);
+        setAuthReady(true);
+        return;
+      }
+      try{
+        const snap=await getDoc(doc(db,"users",firebaseUser.uid));
+        if(!active) return;
+        if(!snap.exists()||snap.data().disabled===true){
+          Sess.clear();
+          setUser(null);
+          await signOut(auth);
+        }else{
+          const data={...snap.data(),id:snap.id,username:snap.id};
+          delete data.pwdHash;
+          delete data.passwordHash;
+          delete data.pendingPasswordReset;
+          Sess.save(data);
+          setUser(data);
+        }
+      }catch(error){
+        if(active&&cachedMatches){
+          // Offline access requires an existing Firebase Auth session and its matching
+          // cached profile; browser-stored passwords are never accepted as authentication.
+          setUser(cached);
+        }else if(active){
+          setUser(null);
+        }
+      }finally{
+        if(active) setAuthReady(true);
+      }
+    });
+    return()=>{ active=false; unsubscribe(); };
   },[]);
 
   const handleInstall=async()=>{
@@ -4562,7 +4671,7 @@ function AppInner(){
   };
 
   const login=u=>{ Sess.save(u); setUser(u); setTab("home"); };
-  const logout=()=>{ Sess.clear(); setUser(null); };
+  const logout=async()=>{ try{ await signOut(auth); } finally{ Sess.clear(); setUser(null); setTab("home"); } };
 
   // ─── ONLINE / OFFLINE STATUS ─────────────────────────────────────────────────
   const [online,setOnline]=useState(navigator.onLine);
@@ -4617,6 +4726,7 @@ function AppInner(){
     return()=>unsub();
   },[user]);
 
+  if(!authReady) return <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",color:C.timber,fontWeight:700}}>Restoring secure session…</div>;
   if(!user) return <AuthScreen onLogin={login}/>;
 
   const isAdmin=user.role==="admin";

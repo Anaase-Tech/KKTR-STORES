@@ -1,0 +1,12 @@
+{
+  "name": "kktr-security-rules-tests",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test rules.test.cjs"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "6.0.0",
+    "firebase": "12.19.0"
+  }
+}

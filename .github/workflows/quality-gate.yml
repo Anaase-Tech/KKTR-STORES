@@ -1,0 +1,79 @@
+name: KKTR quality gate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Regression tests and production build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CI: "true"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Capture full dependency audit report
+        run: npm audit --json > npm-audit-full.json || true
+      - name: Capture production dependency audit report
+        run: npm audit --omit=dev --json > npm-audit-production.json || true
+      - name: Summarize dependency audit findings
+        run: node scripts/summarize-npm-audit.cjs npm-audit-full.json npm-audit-production.json
+      - name: Upload dependency audit reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kktr-npm-audit
+          path: |
+            npm-audit-full.json
+            npm-audit-production.json
+          retention-days: 7
+      - name: Run production guardrail tests
+        run: npm test
+      - name: Build with CI lint enforcement enabled
+        run: npm run build
+      - name: Set up Node.js 22 for backend and emulator tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Generate Security Tests lockfile
+        run: npm --prefix tests/security install --package-lock-only --ignore-scripts --no-audit
+      - name: Clean-install Security Tests dependencies
+        run: npm --prefix tests/security ci --ignore-scripts
+      - name: Test Firestore rules in the local emulator
+        run: npx --yes firebase-tools@15.30.2 emulators:exec --project demo-kktr-rules --only firestore "npm --prefix tests/security test"
+      - name: Upload Security Tests lockfile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kktr-security-tests-lockfile
+          path: tests/security/package-lock.json
+          retention-days: 7
+      - name: Generate Functions lockfile using pinned versions
+        run: npm --prefix functions install --package-lock-only --ignore-scripts --no-audit
+      - name: Clean-install Functions dependencies
+        run: npm --prefix functions ci --ignore-scripts
+      - name: Test server-side credential helpers
+        run: npm --prefix functions test
+      - name: Check Functions source syntax
+        run: npm --prefix functions run check
+      - name: Upload generated Functions lockfile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kktr-functions-lockfile
+          path: functions/package-lock.json
+          retention-days: 7

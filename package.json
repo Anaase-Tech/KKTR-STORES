@@ -10,7 +10,8 @@
   },
   "scripts": {
     "start": "react-scripts start",
-    "build": "react-scripts build"
+    "build": "react-scripts build",
+    "test": "node --test tests/production-guardrails.test.cjs"
   },
   "eslintConfig": {
     "extends": [
@@ -26,5 +27,8 @@
     "development": [
       "last 1 chrome version"
     ]
+  },
+  "devDependencies": {
+    "typescript": "4.9.5"
   }
 }

@@ -1,17 +1,18 @@
 // ─── KKTR SERVICE WORKER v9 ───────────────────────────────────────────────────
 // Caches the entire app shell so it loads even with zero network
 
-const CACHE_NAME = "kktr-v9-shell";
-const RUNTIME_CACHE = "kktr-v9-runtime";
+const CACHE_NAME = "kktr-v10-shell";
+const RUNTIME_CACHE = "kktr-v10-runtime";
 
-// App shell — everything needed to boot the app offline
+// Only include app-shell assets that actually exist in /public.
+// A missing URL makes Cache.addAll reject the entire list and can prevent
+// cold-start offline navigation from working.
 const SHELL_URLS = [
   "/",
   "/index.html",
   "/manifest.json",
-  "/favicon.ico",
-  "/logo192.png",
-  "/logo512.png"
+  "/icon192.png",
+  "/icon512.png"
 ];
 
 // ─── INSTALL: cache app shell ─────────────────────────────────────────────────
