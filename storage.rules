@@ -22,14 +22,18 @@ service firebase.storage {
     function coo() {
       return active() && firestore.get(profilePath()).data.role == 'coo';
     }
+    function isReceiptImage(receiptObject) {
+      return receiptObject.matches('^[A-Za-z0-9_-]+[.]jpg$');
+    }
+    function receiptDocumentExists(receiptObject) {
+      return isReceiptImage(receiptObject) &&
+        firestore.exists(/databases/(default)/documents/receipts/$(receiptObject.split('[.]jpg')[0]));
+    }
     function sameDepartmentReceipt(receiptId) {
       return active() &&
         firestore.exists(/databases/(default)/documents/receipts/$(receiptId)) &&
         firestore.get(/databases/(default)/documents/receipts/$(receiptId)).data.dept ==
           firestore.get(profilePath()).data.dept;
-    }
-    function isReceiptImage(receiptObject) {
-      return receiptObject.matches('^[A-Za-z0-9_-]+[.]jpg$');
     }
 
     match /settings/logo.jpg {
@@ -41,10 +45,10 @@ service firebase.storage {
     }
 
     match /receipts/{receiptObject} {
-      allow read: if isReceiptImage(receiptObject) &&
+      allow read: if receiptDocumentExists(receiptObject) &&
         (admin() || hr() || coo() ||
          sameDepartmentReceipt(receiptObject.split('[.]jpg')[0]));
-      allow create, update: if isReceiptImage(receiptObject) &&
+      allow create, update: if receiptDocumentExists(receiptObject) &&
         (admin() || hr() ||
          sameDepartmentReceipt(receiptObject.split('[.]jpg')[0])) &&
         request.resource.size < 10 * 1024 * 1024 &&
