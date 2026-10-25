@@ -37,9 +37,23 @@ service firebase.storage {
       allow delete: if admin();
     }
 
-    match /receipts/{receiptId}.jpg {
-      allow read: if admin() || hr() || coo() || sameDepartmentReceipt(receiptId);
-      allow create, update: if (admin() || hr() || sameDepartmentReceipt(receiptId)) &&
+    function isReceiptImage(receiptObject) {
+      return receiptObject.matches('^[A-Za-z0-9_-]+\\.jpg
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+});
+    }
+
+    match /receipts/{receiptObject} {
+      allow read: if isReceiptImage(receiptObject) &&
+        (admin() || hr() || coo() ||
+         sameDepartmentReceipt(receiptObject.split('\\.jpg')[0]));
+      allow create, update: if isReceiptImage(receiptObject) &&
+        (admin() || hr() ||
+         sameDepartmentReceipt(receiptObject.split('\\.jpg')[0])) &&
         request.resource.size < 10 * 1024 * 1024 &&
         request.resource.contentType.matches('image/(jpeg|png|webp)');
       allow delete: if false;
