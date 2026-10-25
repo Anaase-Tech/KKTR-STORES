@@ -7,6 +7,8 @@ import {
   onSnapshot, serverTimestamp, runTransaction, increment
 } from "firebase/firestore";
 import { getStorage, ref as sRef, uploadBytes, getDownloadURL } from "firebase/storage";
+import { getAuth, onAuthStateChanged, signInWithCustomToken, signOut } from "firebase/auth";
+import { getFunctions, httpsCallable } from "firebase/functions";
 
 // ─── FIREBASE v7.0 — PROVEN WORKING CONFIG ───────────────────────────────────
 const firebaseConfig = {
@@ -35,6 +37,9 @@ enableIndexedDbPersistence(db).catch(err => {
   }
 });
 const storage = getStorage(app);
+const auth = getAuth(app);
+const functions = getFunctions(app, "us-central1");
+const callBackend = (name, data) => httpsCallable(functions, name)(data);
 
 // ─── IN-APP REPORT SYSTEM v9.6 ────────────────────────────────────────────────
 async function sendInAppReport({
@@ -314,32 +319,32 @@ const SK = "kktr_v7";
 const Sess = {
   save: u => {
     try{
-      // Always ensure name exists before saving
-      const safe={...u, name:u.name||u.username||"User"};
+      if(!u||!u.username||!u.id) return;
+      // Cache a non-secret profile only. Passwords/reset material never belong in browser storage.
+      const safe={...u,name:u.name||u.username||"User"};
+      delete safe.pwdHash;
+      delete safe.passwordHash;
+      delete safe.pendingPasswordReset;
       localStorage.setItem(SK,JSON.stringify(safe));
-    }catch{}
+    }catch(e){ console.warn("[KKTR] Session profile could not be cached."); }
   },
-  load: ()  => {
+  load: () => {
     try{
       const v=localStorage.getItem(SK);
       if(!v) return null;
       const u=JSON.parse(v);
-      // Ensure name field always exists on load
+      if(!u||typeof u!=="object"||!u.username||!u.id) return null;
+      delete u.pwdHash;
+      delete u.passwordHash;
+      delete u.pendingPasswordReset;
       if(!u.name) u.name=u.username||"User";
       return u;
     }catch{return null;}
   },
-  clear:()  => { try{ localStorage.removeItem(SK); }catch{} },
+  clear:() => { try{ localStorage.removeItem(SK); }catch{} },
 };
 
-// ─── PASSWORD HASH ────────────────────────────────────────────────────────────
-async function hashPwd(pwd) {
-  const buf = await crypto.subtle.digest("SHA-256",
-    new TextEncoder().encode(pwd + "kktr_salt_2024"));
-  return Array.from(new Uint8Array(buf))
-    .map(b => b.toString(16).padStart(2,"0")).join("");
-}
-
+// ─── NOTIFICATION HELPER
 // ─── NOTIFICATION HELPER ─────────────────────────────────────────────────────
 async function sendNotification(db, fromUser, toDept, toUserId, toUserName, type, message, extra={}){
   try {
@@ -510,65 +515,33 @@ function LoginScreen({onLogin,onRegister,onForgot}){
     const uname=u.trim().toLowerCase();
     if(!uname||!p){ setErr("Enter your username and password."); return; }
     setLoading(true); setErr("");
-
-    // 1. Check local cache first — instant, zero network
-    const cached=Sess.load();
-    if(cached&&cached.username===uname){
-      try {
-        const pwdHash=await hashPwd(p);
-        if(cached.pwdHash===pwdHash){ onLogin(cached); return; }
-        setErr("Wrong password."); setLoading(false); return;
-      } catch(e2){}
-    }
-
-    // 2. Firestore lookup — username is document ID, O(1) read
     try {
-      const pwdHash=await hashPwd(p);
-      const snap=await getDoc(doc(db,"users",uname));
-
-      if(!snap.exists()){
-        // Never create a privileged account from an unauthenticated browser login.
-        // Administrator provisioning must be performed through a reviewed,
-        // access-controlled server-side process before the account can sign in.
-        setErr(uname===ADMIN_USER
-          ? "Administrator account is not provisioned. Contact the system administrator."
-          : "Wrong username or password.");
-        setLoading(false);
-        return;
+      // Password verification happens server-side. Legacy SHA-256 credentials are
+      // upgraded to scrypt only after a successful password check.
+      const response=await callBackend("authenticateUser",{username:uname,password:p});
+      const payload=response?.data||{};
+      if(!payload.token||!payload.profile||payload.profile.username!==uname){
+        throw new Error("The authentication service returned an invalid response.");
       }
-
-      const data={...snap.data(),id:snap.id};
-      if(!data.approved&&data.role!=="admin"){
-        setErr("Account awaiting approval from Abraham Sackey.");
-        setLoading(false); return;
-      }
-      if(data.pwdHash!==pwdHash){
-        if(data.pendingPasswordReset){
-          const rHash=await hashPwd(data.pendingPasswordReset);
-          if(pwdHash===rHash){
-            await setDoc(doc(db,"users",uname),
-              {...data,pwdHash:rHash,pendingPasswordReset:null},{merge:true});
-            const upd={...data,pwdHash:rHash,pendingPasswordReset:null};
-            Sess.save(upd); onLogin(upd); return;
-          }
-        }
-        setErr("Wrong password."); setLoading(false); return;
-      }
-      // Format display name properly — mutate property, not reassign const
-      if(!data.name || data.name === data.username) {
-        if(data.username && data.username.includes(".")) {
-          const parts = data.username.split(".");
-          const formatted = parts.map(pt => pt.charAt(0).toUpperCase()+pt.slice(1)).join(" ");
-          data.name = formatted;
-          setDoc(doc(db,"users",uname),{name:formatted},{merge:true}).catch(()=>{});
-        }
-      }
-      Sess.save(data); onLogin(data);
+      await signInWithCustomToken(auth,payload.token);
+      Sess.save(payload.profile);
+      onLogin(payload.profile);
+      setP("");
     } catch(e){
-      console.error("Login error:",e);
-      const cached2=Sess.load();
-      if(cached2&&cached2.username===uname){ onLogin(cached2); return; }
-      setErr("Error: "+e.message+(e.code?" ("+e.code+")":""));
+      console.error("[KKTR] Authentication request failed:",e?.code||"unknown");
+      const code=String(e?.code||"");
+      if(code==="functions/permission-denied"){
+        setErr(e.message||"This account is awaiting approval or has been disabled.");
+      }else if(code==="functions/resource-exhausted"){
+        setErr("Too many sign-in attempts. Wait before trying again.");
+      }else if(code==="functions/unavailable"||!navigator.onLine){
+        setErr("A connection to the sign-in service is required for a new sign-in. An existing authenticated session can be restored offline.");
+      }else if(code==="functions/unauthenticated"){
+        setErr("Invalid username or password.");
+      }else{
+        setErr("Sign-in could not be completed. Please retry or contact the system administrator.");
+      }
+    } finally {
       setLoading(false);
     }
   };
