@@ -123,6 +123,12 @@ test("workers are private to HR/admin and each department", async () => {
   await assertFails(setDoc(doc(asUser("yard-head"), "workers", "forbidden"), {
     name: "Not Allowed", nameKey: "not allowed", dept: "Log Yard", type: "casual"
   }));
+  await assertFails(setDoc(doc(asUser("hr"), "workers", "direct-hr-write"), {
+    name: "Direct HR Write", nameKey: "direct hr write", dept: "Log Yard", type: "casual"
+  }));
+  await assertFails(setDoc(doc(asUser("hr"), "workerNameKeys", "forged"), {
+    workerId: "forged"
+  }));
 });
 
 test("HR alone approves attendance and department heads cannot rewrite approved records", async () => {
@@ -153,6 +159,18 @@ test("stock balances cannot change without a same-transaction ledger record", as
     issuedBy: "stores", date: "2026-10-25", createdAt: serverTimestamp()
   });
   await assertSucceeds(batch.commit());
+});
+
+test("an existing ledger ID cannot be replayed for another stock decrease", async () => {
+  await env.withSecurityRulesDisabled(async context => {
+    await setDoc(doc(context.firestore(), "transactions", "tx-already-used"), {
+      type: "lube", action: "issue", itemId: "lube-1", qty: 10
+    });
+  });
+  const db = asUser("admin");
+  await assertFails(updateDoc(doc(db, "lubricants", "lube-1"), {
+    currentStock: 90, lastTransactionId: "tx-already-used", updatedAt: serverTimestamp()
+  }));
 });
 
 test("a ledger record without a matching inventory update is denied", async () => {
