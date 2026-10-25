@@ -22,17 +22,6 @@ const firebaseConfig = {
 
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
 
-// ─── PUSH NOTIFICATION FOUNDATION v9.6 ───────────────────────────────────────
-async function requestPushPermission(){
-  try{
-    if(!("Notification" in window)) return;
-    const permission = await Notification.requestPermission();
-    if(permission === "granted") console.log("Push permission granted");
-  }catch(e){ console.log("Push permission error:", e); }
-}
-
-
-
 // ─── OFFLINE-FIRST FIRESTORE (v9.2 — Firebase v9 compatible) ─────────────────
 // enableIndexedDbPersistence works in Firebase v9 modular SDK
 // Must be called immediately after getFirestore, before any reads/writes
@@ -87,13 +76,23 @@ async function sendInAppReport({
 }
 
 // ─── PDF EXPORT v9.6 ─────────────────────────────────────────────────────────
+function escapeHTML(value){
+  return String(value??"").replace(/[&<>"']/g, char => ({
+    "&":"&amp;",
+    "<":"&lt;",
+    ">":"&gt;",
+    '"':"&quot;",
+    "'":"&#39;"
+  }[char]));
+}
+
 function exportPDF(title,content){
   const win=window.open("","_blank");
   if(!win) return;
   win.document.write(`
     <html>
     <head>
-      <title>${title}</title>
+      <title>${escapeHTML(title)}</title>
       <style>
         body{ font-family:Arial; padding:24px; line-height:1.6; }
         h1{ color:#1a2e1a; }
@@ -101,8 +100,8 @@ function exportPDF(title,content){
       </style>
     </head>
     <body>
-      <h1>${title}</h1>
-      <pre>${content}</pre>
+      <h1>${escapeHTML(title)}</h1>
+      <pre>${escapeHTML(content)}</pre>
     </body>
     </html>
   `);
@@ -448,13 +447,8 @@ function LoginScreen({onLogin,onRegister,onForgot}){
   const [logo,setLogo]=useState(null);
 
   useEffect(()=>{
-    // Unregister any old service workers
-    if("serviceWorker" in navigator){
-      navigator.serviceWorker.getRegistrations().then(regs=>{
-        regs.forEach(r=>r.unregister());
-      });
-    }
-    // Load logo
+    // Load the company logo. The service worker is registered by public/index.html
+    // and must remain registered for the installed PWA/offline app shell.
     getDoc(doc(db,"settings","company"))
       .then(s=>{ if(s.exists()&&s.data().logoUrl) setLogo(s.data().logoUrl); })
       .catch(()=>{});
@@ -481,16 +475,14 @@ function LoginScreen({onLogin,onRegister,onForgot}){
       const snap=await getDoc(doc(db,"users",uname));
 
       if(!snap.exists()){
-        // Admin not in Firestore yet — deploy script should have created it
-        // If still missing, the password itself becomes the hash (first-time setup)
-        if(uname===ADMIN_USER){
-          const adminDoc={id:ADMIN_USER,username:ADMIN_USER,name:"Abraham Sackey",
-            dept:"Administration",role:"admin",approved:true,
-            pwdHash:pwdHash,createdAt:serverTimestamp()};
-          await setDoc(doc(db,"users",ADMIN_USER),adminDoc);
-          Sess.save(adminDoc); onLogin(adminDoc); return;
-        }
-        setErr("Wrong username or password."); setLoading(false); return;
+        // Never create a privileged account from an unauthenticated browser login.
+        // Administrator provisioning must be performed through a reviewed,
+        // access-controlled server-side process before the account can sign in.
+        setErr(uname===ADMIN_USER
+          ? "Administrator account is not provisioned. Contact the system administrator."
+          : "Wrong username or password.");
+        setLoading(false);
+        return;
       }
 
       const data={...snap.data(),id:snap.id};
@@ -3443,6 +3435,7 @@ function COOReqsReport({user,sigName,letterhead,shareReport}){
 function COOAttendReport({user,sigName,letterhead,shareReport}){
   const [reports,setReports]=useState([]);
   const [loading,setLoading]=useState(true);
+  const [attSubmitting,setAttSubmitting]=useState(false);
   useEffect(()=>{
     getDocs(collection(db,"attendanceReports"))
       .then(s=>{
@@ -3474,8 +3467,6 @@ function COOAttendReport({user,sigName,letterhead,shareReport}){
   };
 
   if(loading) return <div style={{textAlign:"center",color:"#aaa",padding:"40px"}}>Loading…</div>;
-
-  const [attSubmitting,setAttSubmitting]=useState(false);
 
   const handleShareAndSubmit=async(via)=>{
     const reportText=buildText();
