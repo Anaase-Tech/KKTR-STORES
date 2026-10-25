@@ -74,10 +74,10 @@ test("unsafe bootstrap script and build-bypass environment file are absent", () 
 
 test("chat sync writes to stable message IDs and does not drop failed messages", () => {
   const start = app.indexOf("const OFFLINE_CHAT_KEY");
-  const end = app.indexOf("// ─── OFFLINE STOCK QUEUE", start);
+  const end = app.indexOf("const OFFLINE_STOCK_KEY", start);
   assert.ok(start >= 0 && end > start, "chat outbox section must exist");
   const queue = app.slice(start, end);
-  assert.match(queue, /setDoc\(doc\(db,"chats",m\.thread,"messages",m\.id\)/);
+  assert.match(queue, /setDoc\(messageRef,/);\n  assert.match(queue, /getDoc\(messageRef,\{source:"server"\}\)/);
   assert.match(queue, /const failed=new Set\(\)/);
   assert.match(queue, /Chat queue was not cleared/);
   assert.doesNotMatch(queue, /await addDoc\(collection\(db, "chats"/);
@@ -94,7 +94,7 @@ test("offline stock queue persists stable IDs and retains failed writes", () => 
   const end = app.indexOf("// Auto-sync when network returns", start);
   assert.ok(start >= 0 && end > start, "stock outbox section must exist");
   const queue = app.slice(start, end);
-  assert.match(queue, /setDoc\(doc\(db,"storeItems",item\.id\)/);
+  assert.match(queue, /setDoc\(itemRef,/);\n  assert.match(queue, /getDoc\(itemRef,\{source:"server"\}\)/);
   assert.match(queue, /const completed=new Set\(\)/);
   assert.match(queue, /const failed=new Set\(\)/);
   assert.match(queue, /if\(remaining\.length\) localStorage\.setItem/);
