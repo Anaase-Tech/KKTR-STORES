@@ -672,8 +672,7 @@ function ForgotScreen({onBack}){
       setSent(true);
     } catch(e){
       showToast("The request could not be submitted. Reconnect and try again.","danger");
-    } finally { setLoading(false); }    } catch(e){ showToast("Failed: "+e.message,"danger"); }
-    setLoading(false);
+    } finally { setLoading(false); }
   };
   return(
     <div style={{minHeight:"100vh",
