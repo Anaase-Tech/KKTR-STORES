@@ -27,5 +27,8 @@
     "development": [
       "last 1 chrome version"
     ]
+  },
+  "devDependencies": {
+    "typescript": "4.9.5"
   }
 }
