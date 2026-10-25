@@ -27,7 +27,7 @@ service firebase.storage {
     }
     function receiptDocumentExists(receiptObject) {
       return isReceiptImage(receiptObject) &&
-        firestore.exists(/databases/(default)/documents/receipts/$(receiptObject.split('[.]jpg')[0]));
+        firestore.exists(/databases/(default)/documents/receipts/$(receiptObject.split('.jpg')[0]));
     }
     function sameDepartmentReceipt(receiptId) {
       return active() &&
@@ -47,10 +47,10 @@ service firebase.storage {
     match /receipts/{receiptObject} {
       allow read: if receiptDocumentExists(receiptObject) &&
         (admin() || hr() || coo() ||
-         sameDepartmentReceipt(receiptObject.split('[.]jpg')[0]));
+         sameDepartmentReceipt(receiptObject.split('.jpg')[0]));
       allow create, update: if receiptDocumentExists(receiptObject) &&
         (admin() || hr() ||
-         sameDepartmentReceipt(receiptObject.split('[.]jpg')[0])) &&
+         sameDepartmentReceipt(receiptObject.split('.jpg')[0])) &&
         request.resource.size < 10 * 1024 * 1024 &&
         request.resource.contentType.matches('image/(jpeg|png|webp)');
       allow delete: if false;
