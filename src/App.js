@@ -140,25 +140,62 @@ async function syncOfflineQueue() {
 // ─── OFFLINE CHAT QUEUE ───────────────────────────────────────────────────────
 const OFFLINE_CHAT_KEY = "kktr_offline_chat_queue";
 
-function queueOfflineChat(thread, payload) {
+function createQueueId(prefix="queue"){
   try {
-    const q = JSON.parse(localStorage.getItem(OFFLINE_CHAT_KEY) || "[]");
-    q.push({ thread, payload, time: Date.now() });
-    localStorage.setItem(OFFLINE_CHAT_KEY, JSON.stringify(q));
+    if(typeof crypto!=="undefined"&&typeof crypto.randomUUID==="function")
+      return prefix+"_"+crypto.randomUUID();
   } catch(e) {}
+  return prefix+"_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,12);
+}
+
+function queueOfflineChat(thread, payload, id) {
+  const q = JSON.parse(localStorage.getItem(OFFLINE_CHAT_KEY) || "[]");
+  const stableId=id||payload?.id||createQueueId("message");
+  if(!q.some(m=>m.id===stableId))
+    q.push({id:stableId,thread,payload,time:Date.now()});
+  localStorage.setItem(OFFLINE_CHAT_KEY, JSON.stringify(q));
+  return stableId;
 }
 
 async function syncOfflineChats() {
   try {
-    const q = JSON.parse(localStorage.getItem(OFFLINE_CHAT_KEY) || "[]");
-    if (!q.length) return;
+    if(!navigator.onLine) return;
+    const raw = JSON.parse(localStorage.getItem(OFFLINE_CHAT_KEY) || "[]");
+    if (!raw.length) return;
+
+    // Assign and persist stable IDs before attempting writes. Retrying a write
+    // targets the same Firestore document instead of creating duplicate messages.
+    const q=raw.map(m=>({...m,id:m.id||m.payload?.id||createQueueId("message")}));
+    localStorage.setItem(OFFLINE_CHAT_KEY,JSON.stringify(q));
+    const completed=new Set();
+    const failed=new Set();
+
     for (const m of q) {
       try {
-        await addDoc(collection(db, "chats", m.thread, "messages"), m.payload);
-      } catch(e) {}
+        const rawDate=m.payload?.createdAt;
+        const date=(typeof rawDate==="string"||typeof rawDate==="number")
+          ?new Date(rawDate):new Date(m.time||Date.now());
+        const createdAt=Number.isNaN(date.getTime())?new Date(m.time||Date.now()):date;
+        await setDoc(doc(db,"chats",m.thread,"messages",m.id),{...m.payload,createdAt});
+        completed.add(m.id);
+      } catch(e) {
+        failed.add(m.id);
+        console.error("[KKTR] Chat sync failed; message kept queued:",e?.message||e);
+      }
     }
-    localStorage.removeItem(OFFLINE_CHAT_KEY);
-  } catch(e) {}
+
+    // Remove only successfully written IDs from the latest queue snapshot.
+    // Messages added while this function awaited Firestore remain queued.
+    const latest=JSON.parse(localStorage.getItem(OFFLINE_CHAT_KEY)||"[]");
+    const remaining=latest.filter(m=>{
+      const id=m.id||m.payload?.id;
+      return !completed.has(id)||failed.has(id);
+    });
+    if(remaining.length) localStorage.setItem(OFFLINE_CHAT_KEY,JSON.stringify(remaining));
+    else localStorage.removeItem(OFFLINE_CHAT_KEY);
+  } catch(e) {
+    console.error("[KKTR] Chat queue was not cleared:",e?.message||e);
+  }
 }
 
 // ─── OFFLINE STOCK QUEUE v9.6 ────────────────────────────────────────────────
@@ -166,42 +203,83 @@ const OFFLINE_STOCK_KEY = "kktr_stock_queue";
 const STOCK_QUEUE_KEY   = "kktr_stock_queue_v96";
 
 function queueOfflineStock(payload) {
-  try {
-    const q = JSON.parse(localStorage.getItem(OFFLINE_STOCK_KEY) || "[]");
-    q.push({ payload, time: Date.now() });
-    localStorage.setItem(OFFLINE_STOCK_KEY, JSON.stringify(q));
-  } catch(e) {}
+  const q=JSON.parse(localStorage.getItem(OFFLINE_STOCK_KEY)||"[]");
+  const id=createQueueId("stock-item");
+  // JSON storage cannot preserve Firestore FieldValue sentinels; use a plain ISO
+  // timestamp and restore it to a Date when synchronizing.
+  q.push({id,payload:{...payload,createdAt:new Date().toISOString()},time:Date.now()});
+  localStorage.setItem(OFFLINE_STOCK_KEY,JSON.stringify(q));
+  return id;
 }
 
 function queueStockOperation(op){
-  try{
-    const q=JSON.parse(localStorage.getItem(STOCK_QUEUE_KEY)||"[]");
-    q.push({...op, queuedAt:Date.now()});
-    localStorage.setItem(STOCK_QUEUE_KEY,JSON.stringify(q));
-  }catch(e){}
+  const q=JSON.parse(localStorage.getItem(STOCK_QUEUE_KEY)||"[]");
+  const id=op.id||createQueueId("stock-tx");
+  if(!q.some(item=>item.id===id))
+    q.push({...op,id,queuedAt:Date.now()});
+  localStorage.setItem(STOCK_QUEUE_KEY,JSON.stringify(q));
+  return id;
 }
 
 async function syncOfflineStock() {
   try {
     if(!navigator.onLine) return;
-    // Sync storeItems queue
-    const q = JSON.parse(localStorage.getItem(OFFLINE_STOCK_KEY) || "[]");
-    if (q.length) {
-      for (const item of q) {
-        try { await addDoc(collection(db, "storeItems"), item.payload); } catch(e) {}
+
+    const rawItems=JSON.parse(localStorage.getItem(OFFLINE_STOCK_KEY)||"[]");
+    if(rawItems.length){
+      const items=rawItems.map(item=>({...item,id:item.id||createQueueId("stock-item")}));
+      localStorage.setItem(OFFLINE_STOCK_KEY,JSON.stringify(items));
+      const completed=new Set();
+      const failed=new Set();
+      for(const item of items){
+        try{
+          const d=new Date(item.payload?.createdAt||item.time||Date.now());
+          await setDoc(doc(db,"storeItems",item.id),{
+            ...item.payload,
+            createdAt:Number.isNaN(d.getTime())?new Date(item.time||Date.now()):d
+          });
+          completed.add(item.id);
+        }catch(e){
+          failed.add(item.id);
+          console.error("[KKTR] Stock-item sync failed; item kept queued:",e?.message||e);
+        }
       }
-      localStorage.removeItem(OFFLINE_STOCK_KEY);
+      const latest=JSON.parse(localStorage.getItem(OFFLINE_STOCK_KEY)||"[]");
+      const remaining=latest.filter(item=>{
+        const id=item.id||item.payload?.id;
+        return !completed.has(id)||failed.has(id);
+      });
+      if(remaining.length) localStorage.setItem(OFFLINE_STOCK_KEY,JSON.stringify(remaining));
+      else localStorage.removeItem(OFFLINE_STOCK_KEY);
     }
-    // Sync transactions queue (v9.6)
-    const q2=JSON.parse(localStorage.getItem(STOCK_QUEUE_KEY)||"[]");
-    if(q2.length){
-      for(const item of q2){
-        try { await addDoc(collection(db,"transactions"),item); } catch(e) {}
+
+    const rawTransactions=JSON.parse(localStorage.getItem(STOCK_QUEUE_KEY)||"[]");
+    if(rawTransactions.length){
+      const transactions=rawTransactions.map(item=>({...item,id:item.id||createQueueId("stock-tx")}));
+      localStorage.setItem(STOCK_QUEUE_KEY,JSON.stringify(transactions));
+      const completed=new Set();
+      const failed=new Set();
+      for(const item of transactions){
+        try{
+          const {id,queuedAt,...data}=item;
+          await setDoc(doc(db,"transactions",id),data);
+          completed.add(id);
+        }catch(e){
+          failed.add(item.id);
+          console.error("[KKTR] Stock-ledger sync failed; entry kept queued:",e?.message||e);
+        }
       }
-      localStorage.removeItem(STOCK_QUEUE_KEY);
-      console.log("Stock queue synced");
+      const latest=JSON.parse(localStorage.getItem(STOCK_QUEUE_KEY)||"[]");
+      const remaining=latest.filter(item=>{
+        const id=item.id;
+        return !completed.has(id)||failed.has(id);
+      });
+      if(remaining.length) localStorage.setItem(STOCK_QUEUE_KEY,JSON.stringify(remaining));
+      else localStorage.removeItem(STOCK_QUEUE_KEY);
     }
-  } catch(e) { console.log("syncOfflineStock error:",e); }
+  } catch(e) {
+    console.error("[KKTR] Stock queue sync was not cleared:",e?.message||e);
+  }
 }
 
 // Auto-sync when network returns
@@ -1083,14 +1161,10 @@ function LubesModule({user}){
       setForm({lubeId:"",qty:"",takenBy:"",equipment:"",desc:""});
     } catch(e){
       if(!navigator.onLine){
-        // Save offline — Firestore persistence will sync the stock update
-        queueOffline("transactions",txData);
-        // Optimistic UI update on lubes list
-        setLubes(prev=>prev.map(l=>l.id===form.lubeId
-          ?{...l,currentStock:(l.currentStock||0)+(action==="restock"?qty:-qty)}
-          :l));
-        showToast(action==="issue"?"✅ Issued offline — will sync!":"✅ Restocked offline — will sync!");
-        setForm({lubeId:"",qty:"",takenBy:"",equipment:"",desc:""});
+        // Firestore runTransaction cannot safely complete offline. Do not enqueue
+        // only the ledger row or change the displayed stock without a committed
+        // stock mutation; both would report a false inventory result.
+        showToast("Stock changes require a live connection to verify availability and record the stock balance safely. Reconnect and retry.","warn");
       } else {
         showToast(e.message||"Failed","danger");
       }
@@ -2164,33 +2238,51 @@ function ChatThread({threadId,label,user,myRole,onBack}){
     // BLOCK department-to-department direct chat
     const targetRole=threadRole(threadId)||"";
     if(user?.role==="dept" && !["admin","hr","coo"].includes(targetRole)){
-      showToast&&showToast("Departments cannot message each other directly","danger");
+      showToast("Departments cannot message each other directly","danger");
       return;
     }
 
     const text=input.trim();
     setInput("");
+    const messageId=createQueueId("message");
     const payload={
+      id:messageId,
       text,
       from:myRole,
       senderName:user?.name||user?.username||myRole,
       role:user.role,
       dept,
       read:false,
-      createdAt:serverTimestamp()
+      createdAt:new Date().toISOString()
     };
+    const optimistic={...payload,createdAt:new Date(payload.createdAt),id:messageId};
 
     if(!navigator.onLine){
-      queueOfflineChat(threadId, payload);
-      setMsgs(prev=>[...prev,{...payload,createdAt:Date.now(),offline:true,id:"_tmp_"+Date.now()}]);
+      try{
+        queueOfflineChat(threadId,payload,messageId);
+        setMsgs(prev=>[...prev, {...optimistic,offline:true}]);
+      }catch(e){
+        setInput(text);
+        showToast("Message could not be saved on this device. Please retry.","danger");
+      }
       return;
     }
 
-    setMsgs(prev=>[...prev,{...payload,createdAt:Date.now(),id:"_tmp_"+Date.now()}]);
-    try {
-      await addDoc(collection(db,"chats",threadId,"messages"),payload);
-    } catch(e){
-      queueOfflineChat(threadId, payload);
+    setMsgs(prev=>[...prev,optimistic]);
+    try{
+      await setDoc(doc(db,"chats",threadId,"messages",messageId),{
+        ...payload,createdAt:new Date(payload.createdAt)
+      });
+    }catch(e){
+      try{
+        queueOfflineChat(threadId,payload,messageId);
+        setMsgs(prev=>prev.map(m=>m.id===messageId?{...m,offline:true}:m));
+        showToast("Message saved locally; delivery is pending connection.","warn");
+      }catch(queueError){
+        setMsgs(prev=>prev.filter(m=>m.id!==messageId));
+        setInput(text);
+        showToast("Message was not sent and could not be queued. Reconnect and retry.","danger");
+      }
     }
   };
 
@@ -2349,6 +2441,8 @@ function AttendanceModule({user}){
         where("dept","==",dept),where("present","==",true)));
       const workerDays={};
       snap.docs.map(d=>d.data()).forEach(r=>{
+        // Chop money is calculated only from HR-approved present days.
+        if(r.status!=="approved") return;
         if(r.date>=wStart&&r.date<=today()){
           workerDays[r.workerId]={
             name:r.workerName,
@@ -2359,10 +2453,24 @@ function AttendanceModule({user}){
       const chopList=Object.entries(workerDays)
         .map(([id,{name,days}])=>({workerId:id,name,days,amount:days*CHOP_RATE}));
       const total=chopList.reduce((s,w)=>s+w.amount,0);
-      await addDoc(collection(db,"chopMoney"),{
-        dept,weekStart:wStart,weekEnd:today(),chopList,totalAmount:total,
-        submittedBy:user?.name||user?.username||"Unknown",
-        status:"pending",createdAt:serverTimestamp()
+      // Stable week key prevents a double-tap or two updated clients from
+      // creating multiple submissions for the same department/week.
+      const deptKey=String(dept||"unknown").normalize("NFKD")
+        .toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"")||"unknown";
+      const submissionId=`weekly-${deptKey}-${wStart}`;
+      const submissionRef=doc(db,"chopMoney",submissionId);
+      const legacy=await getDocs(query(collection(db,"chopMoney"),where("dept","==",dept)));
+      if(legacy.docs.some(d=>d.id!==submissionId&&d.data().weekStart===wStart)){
+        throw new Error("A weekly chop-money submission already exists for this week. Ask HR to reconcile the existing record before resubmitting.");
+      }
+      await runTransaction(db,async(transaction)=>{
+        const existing=await transaction.get(submissionRef);
+        if(existing.exists()) throw new Error("A weekly chop-money submission already exists for this week.");
+        transaction.set(submissionRef,{
+          dept,weekStart:wStart,weekEnd:today(),chopList,totalAmount:total,
+          submittedBy:user?.name||user?.username||"Unknown",
+          status:"pending",createdAt:serverTimestamp()
+        });
       });
       showToast(`✅ Chop money sent to HR!\nTotal: GH₵${total}`);
     } catch(e){ showToast("Failed: "+e.message,"danger"); }
