@@ -4122,7 +4122,9 @@ function SettingsModule({user,onLogout,onInstall}){
     if(myNewPwd.length<12) return showToast("New password must contain at least 12 characters.","warn");
     setLoading(true);
     try{
-      await callBackend("changeOwnPassword",{oldPassword:myOldPwd,newPassword:myNewPwd});
+      const response=await callBackend("changeOwnPassword",{oldPassword:myOldPwd,newPassword:myNewPwd});
+      if(!response?.data?.token) throw new Error("Password changed, but session refresh failed. Sign in again.");
+      await signInWithCustomToken(auth,response.data.token);
       showToast("Password changed successfully.");
       setMyOldPwd(""); setMyNewPwd("");
     }catch(e){
