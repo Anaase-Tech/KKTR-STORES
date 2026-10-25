@@ -11,7 +11,7 @@
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
-    "test": "node --test"
+    "test": "node --test tests/production-guardrails.test.cjs"
   },
   "eslintConfig": {
     "extends": [
