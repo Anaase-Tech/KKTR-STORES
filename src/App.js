@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, Component } from "react";
 import { initializeApp, getApps } from "firebase/app";
 import {
   getFirestore, enableIndexedDbPersistence,
-  doc, setDoc, getDoc, getDocs, addDoc,
+  doc, setDoc, getDoc, getDocFromServer, getDocs, addDoc,
   updateDoc, collection, query, where, orderBy,
   onSnapshot, serverTimestamp, runTransaction
 } from "firebase/firestore";
@@ -118,28 +118,65 @@ function exportPDF(title,content){
 const OQ_KEY = "kktr_offlineQueue";
 
 function queueOffline(collectionName, data) {
-  try {
-    const q = JSON.parse(localStorage.getItem(OQ_KEY) || "[]");
-    q.push({ collection: collectionName, data, time: Date.now() });
-    localStorage.setItem(OQ_KEY, JSON.stringify(q));
-  } catch(e) { console.log("Queue failed:", e.message); }
+  if (collectionName !== "attendance" ||
+      !data || typeof data._docId !== "string" || !data._docId.trim()) {
+    throw new Error("This offline queue accepts only attendance records with a stable document ID.");
+  }
+  const q = JSON.parse(localStorage.getItem(OQ_KEY) || "[]");
+  if (!Array.isArray(q)) throw new Error("The saved offline queue is invalid and was not changed.");
+  const item = { collection: collectionName, data, time: Date.now() };
+  const existingIndex = q.findIndex(existing =>
+    existing.collection === collectionName &&
+    existing.data && existing.data._docId === data._docId
+  );
+  if (existingIndex >= 0) q[existingIndex] = item;
+  else q.push(item);
+  // Let storage/quota errors reach the caller so the UI cannot report a local save that failed.
+  localStorage.setItem(OQ_KEY, JSON.stringify(q));
 }
 
 async function syncOfflineQueue() {
+  let q;
   try {
-    const q = JSON.parse(localStorage.getItem(OQ_KEY) || "[]");
-    if (!q.length) return;
-    const failed = [];
-    for (const item of q) {
-      try {
-        await addDoc(collection(db, item.collection), item.data);
-      } catch(e) {
-        failed.push(item); // keep failed items for next retry
+    q = JSON.parse(localStorage.getItem(OQ_KEY) || "[]");
+  } catch(e) {
+    console.error("[KKTR] Offline queue cannot be read; preserved for recovery.", e?.message||"unknown");
+    return;
+  }
+  if (!Array.isArray(q) || q.length === 0) return;
+
+  const remaining = [];
+  for (const item of q) {
+    try {
+      if (item.collection !== "attendance" ||
+          !item.data || typeof item.data._docId !== "string" || !item.data._docId.trim()) {
+        throw new Error("Unsupported or malformed queued operation.");
       }
+      const { _docId: documentId, createdAt: localCreatedAt, ...payload } = item.data;
+      const target = doc(db, "attendance", documentId);
+      const existing = await getDocFromServer(target);
+      if (existing.exists()) {
+        const saved = existing.data();
+        const sameOperation = saved.workerId === payload.workerId &&
+          saved.dept === payload.dept &&
+          saved.date === payload.date &&
+          saved.present === payload.present;
+        if (sameOperation) continue; // A prior attempt committed; never overwrite a later HR decision.
+        throw new Error("An attendance record with this ID already exists with different data; manual review is required.");
+      }
+      await setDoc(target, { ...payload, createdAt: serverTimestamp() });
+    } catch(e) {
+      console.error("[KKTR] Offline attendance sync retained an item for retry.", e?.code||e?.message||"unknown");
+      remaining.push(item);
     }
-    if (failed.length) localStorage.setItem(OQ_KEY, JSON.stringify(failed));
+  }
+
+  try {
+    if (remaining.length) localStorage.setItem(OQ_KEY, JSON.stringify(remaining));
     else localStorage.removeItem(OQ_KEY);
-  } catch(e) { console.log("Sync error:", e.message); }
+  } catch(e) {
+    console.error("[KKTR] Offline queue state could not be updated; pending records remain on this device.", e?.message||"unknown");
+  }
 }
 
 // ─── OFFLINE CHAT QUEUE ───────────────────────────────────────────────────────
@@ -2409,6 +2446,7 @@ function AttendanceModule({user}){
 
   const saveAtt=async()=>{
     setLoading(true);
+    let queuedCount=0;
     try {
       for(const w of workers){
         const docId=`${dept}_${selDate}_${w.id}`;
@@ -2421,8 +2459,13 @@ function AttendanceModule({user}){
         try {
           await setDoc(doc(db,"attendance",docId),data);
         } catch(e){
-          // Offline — queue for later sync, also cache locally
-          queueOffline("attendance",{...data,_docId:docId});
+          const code=String(e?.code||"").replace(/^firestore\\//,"");
+          const transientNetworkFailure=!navigator.onLine ||
+            ["unavailable","deadline-exceeded","network-request-failed"].includes(code);
+          if(!transientNetworkFailure) throw e;
+          // Store JSON-safe data and a stable ID; serverTimestamp() is recreated on sync.
+          queueOffline("attendance",{...data,createdAt:new Date().toISOString(),_docId:docId});
+          queuedCount++;
           try {
             const key=`kktr_att_${dept}_${selDate}`;
             const local=JSON.parse(localStorage.getItem(key)||"{}");
@@ -2431,9 +2474,12 @@ function AttendanceModule({user}){
           } catch(le){}
         }
       }
-      showToast(navigator.onLine
-        ?"✅ Attendance saved — awaiting HR approval!"
-        :"✅ Saved offline — will sync when connected");
+      showToast(queuedCount>0
+        ?`Saved locally; ${queuedCount} attendance record(s) are waiting to sync.`
+        :(navigator.onLine
+          ?"Attendance saved — awaiting HR approval."
+          :"Attendance saved offline; it will sync when connected."),
+        queuedCount>0?"warn":"ok");
     } catch(e){ showToast("Failed: "+e.message,"danger"); }
     setLoading(false);
   };
