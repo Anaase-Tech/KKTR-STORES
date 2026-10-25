@@ -16,6 +16,7 @@ const {
   verifyLegacyPassword,
   verifyPasswordCredential
 } = require("./src/passwords");
+const { normalizeWorkerName, validateWorkerInput } = require("./src/workers");
 
 if (getApps().length === 0) initializeApp();
 
@@ -205,6 +206,67 @@ async function refreshAccountDirectory() {
   }
   return snapshot.docs.map(d => directoryProfile(d.data(), d.id));
 }
+
+exports.addWorker = onCall({ maxInstances: 5 }, async request => {
+  const actor = await getCallerProfile(request);
+  if (actor.profile.role !== "hr" || actor.profile.approved !== true) {
+    fail("permission-denied", "Only an approved HR user can add workers.");
+  }
+
+  const validated = validateWorkerInput(request.data || {});
+  if (!validated.ok) fail("invalid-argument", validated.reason);
+  const worker = validated.worker;
+  const workerRef = db.collection("workers").doc();
+  const nameKeyRef = db.collection("workerNameKeys").doc(digest(worker.nameKey));
+  const existingWorkers = db.collection("workers");
+  await db.runTransaction(async transaction => {
+    const nameKeySnap = await transaction.get(nameKeyRef);
+    if (nameKeySnap.exists) fail("already-exists", "A worker with this normalized name already exists.");
+    const workerSnapshot = await transaction.get(existingWorkers);
+    const duplicate = workerSnapshot.docs.some(item =>
+      normalizeWorkerName(item.data().name) === worker.nameKey
+    );
+    if (duplicate) fail("already-exists", "A worker with this normalized name already exists.");
+    transaction.create(workerRef, {
+      ...worker,
+      addedBy: cleanText(actor.profile.name, 100) || actor.uid,
+      addedByUid: actor.uid,
+      createdAt: FieldValue.serverTimestamp()
+    });
+    transaction.create(nameKeyRef, {
+      workerId: workerRef.id,
+      nameKey: worker.nameKey,
+      createdAt: FieldValue.serverTimestamp()
+    });
+  });
+
+  return { ok: true, workerId: workerRef.id, worker };
+});
+
+exports.deleteWorker = onCall({ maxInstances: 5 }, async request => {
+  const actor = await getCallerProfile(request);
+  if (actor.profile.role !== "hr" || actor.profile.approved !== true) {
+    fail("permission-denied", "Only an approved HR user can remove workers.");
+  }
+  const workerId = cleanText(request.data && request.data.workerId, 150);
+  if (!workerId || workerId.includes("/")) fail("invalid-argument", "A valid worker ID is required.");
+
+  const workerRef = db.collection("workers").doc(workerId);
+  await db.runTransaction(async transaction => {
+    const workerSnap = await transaction.get(workerRef);
+    if (!workerSnap.exists) fail("not-found", "Worker was not found.");
+    const worker = workerSnap.data();
+    const key = normalizeWorkerName(worker.name);
+    const nameKeyRef = db.collection("workerNameKeys").doc(digest(key));
+    const keySnap = await transaction.get(nameKeyRef);
+    if (keySnap.exists && keySnap.data().workerId === workerId) {
+      transaction.delete(nameKeyRef);
+    }
+    transaction.delete(workerRef);
+  });
+
+  return { ok: true, workerId };
+});
 
 exports.listAccounts = onCall({ maxInstances: 5 }, async request => {
   await assertAdministrator(request);
