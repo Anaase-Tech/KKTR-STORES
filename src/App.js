@@ -4197,21 +4197,8 @@ function SettingsModule({user,onLogout,onInstall}){
     showToast("Factory reset is disabled. Production records may only be removed through a reviewed backup, retention, and recovery procedure.","warn");
   };
 
-    const clearChats=async()=>{
-    if(!window.confirm("Delete all chat messages from all departments?")) return;
-    setLoading(true);
-    try {
-      for(const dept of DEPTS){
-        for(const role of STAFF_ROLES){
-          try {
-            const msgs=await getDocs(collection(db,"chats",threadKey(dept,role),"messages"));
-            for(const d of msgs.docs) await deleteDoc(d.ref);
-          } catch(e2){}
-        }
-      }
-      showToast("✅ All chats cleared!");
-    } catch(e){ showToast("Failed: "+e.message,"danger"); }
-    setLoading(false);
+  const clearChats=async()=>{
+    showToast("Chat deletion is disabled to preserve the audit trail. A reviewed retention policy and server-side purge procedure are required before permanent deletion can be enabled.","warn");
   };
 
   const pending=users.filter(u=>!u.approved&&u.role==="dept");
@@ -4480,7 +4467,7 @@ function SettingsModule({user,onLogout,onInstall}){
               Cannot be undone.</div>
             <Btn onClick={clearChats} loading={loading} color={C.warn}
               style={{width:"100%",justifyContent:"center"}}>
-              🗑 Clear All Chats</Btn>
+              Clear All Chats (disabled)</Btn>
           </Card>
           <Card style={{border:`1.5px solid ${C.danger}`}}>
             <div style={{fontWeight:800,color:C.danger,marginBottom:"8px"}}>⚠ Factory Reset</div>
