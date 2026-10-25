@@ -983,8 +983,10 @@ function COODashboard({user,onNav}){
     const uC=onSnapshot(query(collection(db,"chopMoney"),
       where("status","==","pending")),
       s=>setP(x=>({...x,chop:s.size})));
-    const uH=onSnapshot(query(collection(db,"reports"),where("toRole","==","coo")),
-      s=>setP(x=>({...x,hrReports:s.size})));
+    const uH=onSnapshot(collection(db,"reports"),
+      s=>setP(x=>({...x,hrReports:s.docs.filter(d=>{
+        const r=d.data(); return r.targetRole==="coo"||r.toRole==="coo";
+      }).length})));
     return()=>{uR();uA();uC();uH();};
   },[]);
   return(
@@ -3754,13 +3756,20 @@ function COOHRReport({user,sigName,letterhead,shareReport}){
   const [detail,setDetail]=useState(null);
   const [loading,setLoading]=useState(true);
   useEffect(()=>{
-    // Read from unified reports collection — all reports sent to COO
-    getDocs(query(collection(db,"reports"),where("targetRole","==","coo")))
-      .then(s=>{
-        const all=s.docs.map(d=>({id:d.id,...d.data()}));
-        all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
-        setReports(all); setLoading(false);
-      }).catch(()=>setLoading(false));
+    // Subscribe to the unified report collection so new submissions appear live.
+    // Include both recipient fields to preserve visibility of legacy records.
+    const unsubscribe=onSnapshot(collection(db,"reports"),snapshot=>{
+      const all=snapshot.docs
+        .map(d=>({id:d.id,...d.data()}))
+        .filter(r=>r.targetRole==="coo"||r.toRole==="coo");
+      all.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+      setReports(all);
+      setLoading(false);
+    },error=>{
+      console.error("[KKTR] COO report subscription failed:",error?.code||"unknown");
+      setLoading(false);
+    });
+    return()=>unsubscribe();
   },[]);
 
   const buildText=()=>{
