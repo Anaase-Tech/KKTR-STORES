@@ -579,3 +579,107 @@ exports.deleteAccount = onCall({ maxInstances: 3 }, async request => {
   await batch.commit();
   return { ok: true, username: targetId };
 });
+
+
+exports.submitReportToCOO = onCall({ maxInstances: 5 }, async request => {
+  const { uid, profile } = await getCallerProfile(request);
+  const allowedRoles = new Set(["admin", "hr", "store_manager", "coo"]);
+  if (!allowedRoles.has(profile.role) || profile.approved !== true) {
+    fail("permission-denied", "Only an approved HR, Stores, Admin, or COO account can submit operational reports.");
+  }
+
+  const data = request.data || {};
+  const type = cleanText(data.type, 30);
+  const title = cleanText(data.title, 180);
+  const body = typeof data.body === "string" ? data.body : "";
+  const period = cleanText(data.period, 100);
+  const dept = cleanText(data.dept, 100) ||
+    (profile.role === "hr" ? "HR" : profile.role === "coo" ? "Administration" : "Stores");
+  const allowedTypes = new Set(["general", "attendance", "chop", "stores"]);
+  if (!allowedTypes.has(type)) fail("invalid-argument", "The report type is not supported.");
+  if (!title || title.length > 180) fail("invalid-argument", "A report title of 1–180 characters is required.");
+  if (body.length > 100000) fail("invalid-argument", "Report body exceeds the 100,000-character limit.");
+  if (typeof data.period === "string" && data.period.length > 100) {
+    fail("invalid-argument", "The report period must be 100 characters or fewer.");
+  }
+  if (!dept || dept.length > 100) fail("invalid-argument", "A valid report department is required.");
+
+  let summary = {};
+  if (data.summary !== undefined && data.summary !== null) {
+    if (typeof data.summary !== "object" || Array.isArray(data.summary)) {
+      fail("invalid-argument", "Report summary must be an object.");
+    }
+    summary = data.summary;
+  }
+  let summaryJson;
+  try {
+    summaryJson = JSON.stringify(summary);
+  } catch {
+    fail("invalid-argument", "Report summary is not valid JSON data.");
+  }
+  if (Buffer.byteLength(summaryJson || "{}", "utf8") > 20000) {
+    fail("invalid-argument", "Report summary exceeds the 20,000-byte limit.");
+  }
+
+  // Never trust sender identity or recipient fields supplied by the browser.
+  const cooSnapshot = await db.collection("users").where("role", "==", "coo").get();
+  const recipients = cooSnapshot.docs.filter(docSnap => {
+    const candidate = docSnap.data();
+    return candidate.approved === true && candidate.disabled !== true;
+  });
+  // A single Firestore transaction can write at most 500 documents. Fail visibly
+  // rather than saving a report while silently dropping recipient notifications.
+  if (recipients.length > 400) {
+    fail("resource-exhausted", "There are too many COO recipients to notify safely in one transaction.");
+  }
+
+  const actorName = cleanText(profile.name, 100) || uid;
+  const reportRef = db.collection("reports").doc();
+  const notificationRefs = recipients.map(recipient => ({
+    uid: recipient.id,
+    ref: db.collection("notifications").doc()
+  }));
+  const report = {
+    type,
+    title,
+    body,
+    reportText: body,
+    dept,
+    from: actorName,
+    fromRole: profile.role,
+    submittedBy: actorName,
+    submittedByUid: uid,
+    fromDept: dept,
+    period,
+    toRole: "coo",
+    targetRole: "coo",
+    targetDept: "Administration",
+    summary,
+    status: "submitted",
+    createdByUid: uid,
+    createdAt: FieldValue.serverTimestamp()
+  };
+
+  await db.runTransaction(async transaction => {
+    transaction.create(reportRef, report);
+    for (const recipient of notificationRefs) {
+      transaction.create(recipient.ref, {
+        type: "report",
+        title: "New operational report",
+        message: title,
+        reportId: reportRef.id,
+        toUserId: recipient.uid,
+        toRole: "coo",
+        targetRole: "coo",
+        read: false,
+        createdAt: FieldValue.serverTimestamp()
+      });
+    }
+  });
+
+  return {
+    ok: true,
+    reportId: reportRef.id,
+    notificationRecipients: notificationRefs.length
+  };
+});
