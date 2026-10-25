@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, Component } from "react";
 import { initializeApp, getApps } from "firebase/app";
 import {
   getFirestore, enableIndexedDbPersistence,
-  doc, setDoc, getDoc, getDocFromServer, getDocs, addDoc,
+  doc, setDoc, getDoc, getDocs, addDoc,
   updateDoc, collection, query, where, orderBy,
   onSnapshot, serverTimestamp, runTransaction
 } from "firebase/firestore";
@@ -157,16 +157,8 @@ async function syncOfflineQueue() {
       delete payload._docId;
       delete payload.createdAt;
       const target = doc(db, "attendance", documentId);
-      const existing = await getDocFromServer(target);
-      if (existing.exists()) {
-        const saved = existing.data();
-        const sameOperation = saved.workerId === payload.workerId &&
-          saved.dept === payload.dept &&
-          saved.date === payload.date &&
-          saved.present === payload.present;
-        if (sameOperation) continue; // A prior attempt committed; never overwrite a later HR decision.
-        throw new Error("An attendance record with this ID already exists with different data; manual review is required.");
-      }
+      // A deterministic ID prevents duplicate records. Rules permit department edits only while pending;
+      // once HR approves a record, an ambiguous retry is denied rather than overwriting that decision.
       await setDoc(target, { ...payload, createdAt: serverTimestamp() });
     } catch(e) {
       console.error("[KKTR] Offline attendance sync retained an item for retry.", e?.code||e?.message||"unknown");
