@@ -152,7 +152,10 @@ async function syncOfflineQueue() {
           !item.data || typeof item.data._docId !== "string" || !item.data._docId.trim()) {
         throw new Error("Unsupported or malformed queued operation.");
       }
-      const { _docId: documentId, createdAt: localCreatedAt, ...payload } = item.data;
+      const documentId = item.data._docId;
+      const payload = { ...item.data };
+      delete payload._docId;
+      delete payload.createdAt;
       const target = doc(db, "attendance", documentId);
       const existing = await getDocFromServer(target);
       if (existing.exists()) {
@@ -2459,7 +2462,7 @@ function AttendanceModule({user}){
         try {
           await setDoc(doc(db,"attendance",docId),data);
         } catch(e){
-          const code=String(e?.code||"").replace(/^firestore\\//,"");
+          const code=String(e?.code||"").replace("firestore/","");
           const transientNetworkFailure=!navigator.onLine ||
             ["unavailable","deadline-exceeded","network-request-failed"].includes(code);
           if(!transientNetworkFailure) throw e;
