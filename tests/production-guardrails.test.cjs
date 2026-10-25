@@ -67,13 +67,14 @@ test("COO report delivery uses a consistent schema and does not claim failed wri
   assert.match(writer, /transaction\.set\(notificationRef/);
   assert.doesNotMatch(writer, /catch\s*\(/, "report write errors must reach the caller");
   const cooStart = app.indexOf("function COOHRReport(");
-  const cooEnd = app.indexOf("\\nfunction ", cooStart + 1);
+  const cooEnd = app.indexOf("\nfunction ", cooStart + 1);
   const coo = app.slice(cooStart, cooEnd < 0 ? app.length : cooEnd);
-  assert.match(coo, /where\(\\"targetRole\\",\\"==\\",\\"coo\\"\)/);
+  assert.ok(coo.includes('where(collection(db,"reports"),where("targetRole","==","coo"))'));
   assert.match(coo, /detail\.body\|\|detail\.text\|\|detail\.reportText/);
   assert.doesNotMatch(app, /233XXXXXXXXX|coo@kktr\.com/);
   assert.match(app, /delivery is unavailable until an authorized administrator configures and verifies/);
 });
+
 
 test("service-worker shell refers to real public icon files", () => {
   const match = serviceWorker.match(/const SHELL_URLS = \[([\s\S]*?)\];/);
