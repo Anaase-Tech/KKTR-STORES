@@ -23,8 +23,10 @@ service cloud.firestore {
     function pairedStockChange(stockPath, transactionId) {
       let before = get(stockPath);
       let after = getAfter(stockPath);
-      let tx = getAfter(/databases/$(database)/documents/transactions/$(transactionId));
-      return before.exists() && after.exists() && tx.exists() &&
+      let txPath = /databases/$(database)/documents/transactions/$(transactionId);
+      let tx = getAfter(txPath);
+      // A ledger ID may be used once only; otherwise an old issue could be replayed.
+      return !exists(txPath) && before.exists() && after.exists() && tx.exists() &&
         after.data.lastTransactionId == transactionId &&
         tx.data.qty is number && tx.data.qty > 0 &&
         ((tx.data.action == 'issue' &&
