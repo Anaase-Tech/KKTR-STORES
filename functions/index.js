@@ -95,7 +95,7 @@ async function getCallerProfile(request) {
   const profile = snap.data();
   if (profile.disabled === true) fail("permission-denied", "This account has been disabled.");
   const storedVersion = Number(profile.sessionVersion ?? 0);
-  const tokenVersion = Number(request.auth.token && request.auth.token.sessionVersion ?? 0);
+  const tokenVersion = Number((request.auth.token && request.auth.token.sessionVersion) ?? 0);
   if (!Number.isSafeInteger(storedVersion) || storedVersion < 0 ||
       !Number.isSafeInteger(tokenVersion) || tokenVersion !== storedVersion) {
     fail("unauthenticated", "This session has expired. Sign in again.");
