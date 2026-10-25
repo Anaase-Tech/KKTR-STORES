@@ -94,6 +94,12 @@ async function getCallerProfile(request) {
   if (!snap.exists) fail("permission-denied", "The account profile is not active.");
   const profile = snap.data();
   if (profile.disabled === true) fail("permission-denied", "This account has been disabled.");
+  const storedVersion = Number(profile.sessionVersion ?? 0);
+  const tokenVersion = Number(request.auth.token && request.auth.token.sessionVersion ?? 0);
+  if (!Number.isSafeInteger(storedVersion) || storedVersion < 0 ||
+      !Number.isSafeInteger(tokenVersion) || tokenVersion !== storedVersion) {
+    fail("unauthenticated", "This session has expired. Sign in again.");
+  }
   return { uid, profile };
 }
 
@@ -311,15 +317,25 @@ exports.authenticateUser = onCall({ maxInstances: 10 }, async request => {
     });
   }
 
-  await ensureAuthUser(username, profile.name || username);
-  await syncAccountDirectory(username, profile);
+  // Seed a server-side session version for existing legacy profiles before issuing
+  // any signed-in token; this lets rules revoke older tokens after role/password changes.
+  const refreshedProfile = (await userRef.get()).data();
+  const sessionVersion = Number.isSafeInteger(refreshedProfile.sessionVersion) &&
+    refreshedProfile.sessionVersion >= 0 ? refreshedProfile.sessionVersion : 0;
+  if (refreshedProfile.sessionVersion !== sessionVersion) {
+    await userRef.update({ sessionVersion });
+  }
+  const authenticatedProfile = { ...refreshedProfile, sessionVersion };
+  await ensureAuthUser(username, authenticatedProfile.name || username);
+  await syncAccountDirectory(username, authenticatedProfile);
   const token = await auth.createCustomToken(username, {
-    role: profile.role,
-    dept: cleanText(profile.dept, 100)
+    role: authenticatedProfile.role,
+    dept: cleanText(authenticatedProfile.dept, 100),
+    sessionVersion
   });
   return {
     token,
-    profile: sanitizeProfile(profile, username)
+    profile: sanitizeProfile(authenticatedProfile, username)
   };
 });
 
@@ -357,6 +373,7 @@ exports.registerDepartmentHead = onCall({ maxInstances: 5 }, async request => {
       dept,
       role: "dept",
       approved: false,
+      sessionVersion: 0,
       createdAt: FieldValue.serverTimestamp()
     });
     transaction.create(credentialRef, {
@@ -441,7 +458,8 @@ exports.setAccountRole = onCall({ maxInstances: 5 }, async request => {
     transaction.update(targetRef, {
       role: nextRole,
       roleChangedBy: actorUid,
-      roleChangedAt: FieldValue.serverTimestamp()
+      roleChangedAt: FieldValue.serverTimestamp(),
+      sessionVersion: (Number(target.sessionVersion) || 0) + 1
     });
   });
   await syncAccountDirectory(targetId, (await targetRef.get()).data());
@@ -473,7 +491,8 @@ exports.resetUserPassword = onCall({ maxInstances: 5 }, async request => {
     pwdHash: FieldValue.delete(),
     pendingPasswordReset: FieldValue.delete(),
     passwordResetBy: actorUid,
-    passwordResetAt: FieldValue.serverTimestamp()
+    passwordResetAt: FieldValue.serverTimestamp(),
+    sessionVersion: (Number(userSnap.data().sessionVersion) || 0) + 1
   });
   await syncAccountDirectory(targetId, (await userRef.get()).data());
 
@@ -521,9 +540,15 @@ exports.changeOwnPassword = onCall({ maxInstances: 5 }, async request => {
   await db.collection("users").doc(uid).update({
     pwdHash: FieldValue.delete(),
     pendingPasswordReset: FieldValue.delete(),
-    passwordChangedAt: FieldValue.serverTimestamp()
+    passwordChangedAt: FieldValue.serverTimestamp(),
+    sessionVersion: (Number(profile.sessionVersion) || 0) + 1
   });
-  return { ok: true };
+  const token = await auth.createCustomToken(uid, {
+    role: profile.role,
+    dept: cleanText(profile.dept, 100),
+    sessionVersion: (Number(profile.sessionVersion) || 0) + 1
+  });
+  return { ok: true, token };
 });
 
 exports.deleteAccount = onCall({ maxInstances: 3 }, async request => {
