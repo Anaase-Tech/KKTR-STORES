@@ -3170,40 +3170,28 @@ function AttendanceReports({user}){
 
           {detail.status==="pending"&&(
             <Btn onClick={async()=>{
-              await updateDoc(doc(db,"attendanceReports",detail.id),{
-                status:"approved",
-                approvedBy:user?.name||user?.username||"HR",
-                approvedAt:serverTimestamp()
-              });
-              // Submit attendance + chop money report to COO dashboard
               try {
-                const totalPresent=detail.summary?.reduce((s,w)=>s+(w.present||0),0)||0;
-                const totalAbsent=detail.summary?.reduce((s,w)=>s+(w.absent||0),0)||0;
-                const totalChop=detail.summary?.reduce((s,w)=>s+(w.chopMoney||0),0)||0;
-                await addDoc(collection(db,"reports"),{
-                  type:"attendance",
-                  title:`Attendance Report — ${detail.dept} (${detail.month||detail.monthStart||""})`,
-                  period:detail.month||detail.monthStart||today(),
-                  fromDept:"HR",
-                  fromRole:"hr",
-                  submittedBy:user?.name||user?.username||"HR",
-                  targetRole:"coo",
-                  targetDept:"Administration",
-                  status:"submitted",
-                  summary:{
-                    dept:detail.dept,
-                    totalPresent,
-                    totalAbsent,
-                    totalChopMoney:totalChop,
-                    workers:detail.summary?.length||0
-                  },
-                  createdAt:serverTimestamp()
+                const response=await callBackend("approveAttendanceReportAndSendToCOO",{
+                  attendanceReportId:detail.id
                 });
-              } catch(e2){}
-              showToast("✅ Acknowledged, Filed & Sent to COO!"); setDetail(null);
+                const result=response?.data;
+                if(!result?.ok||!result?.reportId){
+                  throw new Error("The server did not confirm approval and filing.");
+                }
+                if(result.notificationRecipients>0){
+                  showToast(result.alreadySubmitted
+                    ?"This attendance report was already filed with the COO."
+                    :`Attendance approved and filed; ${result.notificationRecipients} active COO account(s) notified.`);
+                }else{
+                  showToast("Attendance approved and filed to the COO inbox, but no active approved COO account could be notified.","warn");
+                }
+                setDetail(null);
+              }catch(e){
+                showToast("Attendance approval/report filing failed: "+(e?.message||"Unknown error"),"danger");
+              }
             }} color={C.ok}
               style={{width:"100%",justifyContent:"center",marginTop:"12px"}}>
-              ✓ Acknowledge, File & Send to COO</Btn>
+              ✓ Approve, File & Notify COO</Btn>
           )}
         </Modal>
       )}
@@ -3320,28 +3308,26 @@ function ReportsModule({user}){
     try {
       const {from:f2,to:t2}=getRange();
       const pLabel={daily:"Daily",weekly:"Weekly",monthly:"Monthly",annual:"Annual",custom:"Custom"}[period];
-      await addDoc(collection(db,"reports"),{
+      const summary={
+        lubesIssued:lubeIssued.length,
+        storeIssued:storeIssued.length,
+        requisitions:reqs.length,
+        receipts:receipts.length,
+        totalReceipts:totalAmt,
+        lowStockCount:lowLubes.length+lowStore.length,
+      };
+      const submission=await sendInAppReport({
         type:"stores",
         title:`${pLabel} Stores Report`,
         period:`${f2} to ${t2}`,
-        fromDept:"Stores",
-        fromRole:user.role,
-        submittedBy:sigName,
-        targetRole:"coo",
-        targetDept:"Administration",
-        status:"submitted",
-        summary:{
-          lubesIssued:lubeIssued.length,
-          storeIssued:storeIssued.length,
-          requisitions:reqs.length,
-          receipts:receipts.length,
-          totalReceipts:totalAmt,
-          lowStockCount:lowLubes.length+lowStore.length,
-        },
-        reportText:buildStoresReport(),
-        createdAt:serverTimestamp()
+        dept:"Stores",
+        summary,
+        body:buildStoresReport()
       });
-      showSubmitToast("✅ Report submitted to COO!");
+      showSubmitToast(submission.notificationRecipients>0
+        ?`✅ Stores report filed; ${submission.notificationRecipients} active COO account(s) notified.`
+        :"Stores report saved to COO inbox, but no active approved COO account could be notified.",
+        submission.notificationRecipients>0?"ok":"warn");
     } catch(e){ showSubmitToast("Failed: "+e.message,"danger"); }
     setSubmitting(false);
   };
