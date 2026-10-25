@@ -102,3 +102,33 @@ test("chat component defines and renders its own access-control toast", () => {
   assert.match(component, /\{toastEl\}/);
   assert.doesNotMatch(component, /showToast&&showToast/);
 });
+
+
+test("dependency audit summarizer emits findings from npm's JSON report", () => {
+  const os = require("node:os");
+  const { spawnSync } = require("node:child_process");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "kktr-audit-test-"));
+  const fixture = path.join(directory, "audit.json");
+  try {
+    fs.writeFileSync(fixture, JSON.stringify({
+      metadata: { vulnerabilities: { total: 1, critical: 1, high: 0, moderate: 0, low: 0, info: 0 } },
+      vulnerabilities: {
+        "sample-vulnerable-package": {
+          severity: "critical",
+          isDirect: false,
+          range: "<1.2.3",
+          fixAvailable: true,
+          via: [{ title: "Example advisory", url: "https://example.invalid/advisory" }]
+        }
+      }
+    }));
+    const script = path.join(root, "scripts", "summarize-npm-audit.cjs");
+    const result = spawnSync(process.execPath, [script, fixture], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /critical/);
+    assert.match(result.stdout, /sample-vulnerable-package/);
+    assert.match(result.stdout, /Example advisory/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
