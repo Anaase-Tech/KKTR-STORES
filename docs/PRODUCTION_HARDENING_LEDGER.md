@@ -72,8 +72,8 @@ These are not claimed to be fixed in phase one. Each must be closed with code, r
 
 ### P1 — Reports, attendance, and chop money
 
-- HR and Stores report writers/readers use inconsistent fields (toRole versus targetRole and body versus reportText), so COO report visibility/counts are inconsistent.
-- The HR report error fallback is undermined by a helper that catches and swallows failures. Align one validated report schema, surface delivery failures, and persist a recoverable outbox entry before showing success.
+- The shared HR report writer now writes both `toRole` and `targetRole`, plus `submittedBy`, `fromDept`, and `period`; the COO inbox subscribes to report changes in real time and accepts either recipient field for legacy records. The COO dashboard count also includes either field. The detail view reads `body`, `text`, or `reportText`.
+- Report and notification writes are now one Firestore transaction, and write errors propagate rather than being swallowed. The UI no longer claims an external message was delivered merely because WhatsApp/email opened. The offline report outbox is **not** implemented yet: offline submission must fail visibly until a durable, idempotent outbox is built and tested.
 - Weekly chop-money calculation on this branch now counts only records with status=approved and uses a deterministic department/week document ID inside a Firestore transaction. It also checks for legacy records for the same week before submission. These changes still need integration tests against deployed security rules and existing production data; preserve approval/audit history.
 - A browser print view is not a persisted PDF. A real PDF workflow must generate/store an artifact, save a verified storage path/URL, enforce access controls, and report upload/send failures honestly.
 - Email and WhatsApp routing must use verified, configured contact details. No placeholder address/number should be shown as configured.
