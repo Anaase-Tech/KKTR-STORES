@@ -207,6 +207,14 @@ test("factory reset cannot directly delete production records from the browser",
 });
 
 
+test("account settings effect declares its stable toast dependency", () => {
+  const start = app.indexOf("function SettingsModule(");
+  const end = app.indexOf("// ─── ERROR BOUNDARY", start);
+  const settings = app.slice(start, end);
+  assert.match(app, /const show=useCallback\(\(m,k="ok"\)/);
+  assert.match(settings, /\},\[user,showToast\]\);/);
+});
+
 test("account administration uses the sanitized live directory, never raw profile-list reads", () => {
   assert.match(app, /callBackend\("listAccounts",\{\}\)/);
   assert.match(app, /collection\(db,"accountDirectory"\)/);
