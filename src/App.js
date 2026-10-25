@@ -48,11 +48,12 @@ async function sendInAppReport({
   body="",
   dept="",
   period="",
-  summary={}
+  summary={},
+  range=null
 }){
   // Identity, recipient routing, and notification fan-out are server-authoritative.
   const response=await callBackend("submitReportToCOO",{
-    type,title,body,dept,period,summary
+    type,title,body,dept,period,summary,range
   });
   const result=response?.data;
   if(!result?.ok||!result?.reportId){
@@ -3321,8 +3322,7 @@ function ReportsModule({user}){
         title:`${pLabel} Stores Report`,
         period:`${f2} to ${t2}`,
         dept:"Stores",
-        summary,
-        body:buildStoresReport()
+        range:{from:f2,to:t2}
       });
       showSubmitToast(submission.notificationRecipients>0
         ?`✅ Stores report filed; ${submission.notificationRecipients} active COO account(s) notified.`
