@@ -4,7 +4,7 @@ import {
   getFirestore, enableIndexedDbPersistence,
   doc, setDoc, getDoc, getDocs, addDoc,
   updateDoc, deleteDoc, collection, query, where, orderBy,
-  onSnapshot, serverTimestamp, runTransaction, increment
+  onSnapshot, serverTimestamp, runTransaction
 } from "firebase/firestore";
 import { getStorage, ref as sRef, uploadBytes, getDownloadURL } from "firebase/storage";
 import { getAuth, onAuthStateChanged, signInWithCustomToken, signOut } from "firebase/auth";
@@ -293,8 +293,6 @@ setInterval(() => {
 const DEPTS = ["Log Yard","Sawmill","Saw Shop","Workshop","Charcoal","Kindry",
                "Chainsaw","Security","Administration","HR"];
 const CHOP_RATE = 10;
-const ADMIN_USER = "abraham.sackey";
-// ADMIN_PASS removed from code — hash stored in Firestore only
 
 // Safe name helper — prevents crash if user.name is undefined
 const getFirstName = u => (u?.name||u?.username||"User").split(" ")[0];
@@ -4057,7 +4055,6 @@ function SettingsModule({user,onLogout,onInstall}){
   const [newPwd,setNewPwd]=useState("");
   const [myOldPwd,setMyOldPwd]=useState("");
   const [myNewPwd,setMyNewPwd]=useState("");
-  const [factoryPwd,setFactoryPwd]=useState("");
   const [loading,setLoading]=useState(false);
   const [logo,setLogo]=useState(null);
   const [logoLoading,setLogoLoading]=useState(false);
