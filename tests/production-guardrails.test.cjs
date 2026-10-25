@@ -86,7 +86,7 @@ test("chat sync writes to stable message IDs and does not drop failed messages",
 test("lubricant transactions are not falsely reported as committed while offline", () => {
   assert.doesNotMatch(app, /queueOffline\("transactions",txData\)/);
   assert.doesNotMatch(app, /Issued offline — will sync|Restocked offline — will sync/);
-  assert.match(app, /Stock changes require a live connection to verify availability/);
+  assert.match(app, /Stock changes require a live connection to (?:verify availability|commit the balance and ledger together)/);
 });
 
 test("offline stock queue persists stable IDs and retains failed writes", () => {
