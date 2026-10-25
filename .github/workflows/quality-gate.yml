@@ -26,6 +26,21 @@ jobs:
           cache: npm
       - name: Install locked dependencies
         run: npm ci
+      - name: Capture full dependency audit report
+        run: npm audit --json > npm-audit-full.json || true
+      - name: Capture production dependency audit report
+        run: npm audit --omit=dev --json > npm-audit-production.json || true
+      - name: Summarize dependency audit findings
+        run: node scripts/summarize-npm-audit.cjs npm-audit-full.json npm-audit-production.json
+      - name: Upload dependency audit reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kktr-npm-audit
+          path: |
+            npm-audit-full.json
+            npm-audit-production.json
+          retention-days: 7
       - name: Run production guardrail tests
         run: npm test
       - name: Build with CI lint enforcement enabled
