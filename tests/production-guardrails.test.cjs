@@ -88,9 +88,11 @@ test("offline attendance retries are stable, idempotent, JSON-safe, and preserve
   const queue = app.slice(start, end);
   assert.match(queue, /collectionName !== "attendance"/);
   assert.match(queue, /existing\.data\._docId === data\._docId/);
-  assert.match(queue, /getDocFromServer\(target\)/);
+  assert.match(queue, /const target = doc\(db, "attendance", documentId\)/);
+  assert.match(queue, /await setDoc\(target, \{ \.\.\.payload, createdAt: serverTimestamp\(\) \}\)/);
   assert.match(queue, /remaining\.push\(item\)/);
   assert.doesNotMatch(queue, /await addDoc\(collection\(db, item\.collection\)/);
+  assert.doesNotMatch(queue, /getDocFromServer\(target\)/);
   assert.match(app, /queueOffline\("attendance",\{\.\.\.data,createdAt:new Date\(\)\.toISOString\(\),_docId:docId\}\)/);
   assert.match(app, /const transientNetworkFailure=!navigator\.onLine/);
 });
