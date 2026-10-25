@@ -2697,33 +2697,34 @@ function HRReportSender({user}){
       if(!text){ showToast("No data for "+month,"warn"); setLoading(false); return; }
 
       // Do not report success if the database did not commit the report.
-      await sendInAppReport({
+      const submission=await sendInAppReport({
         type:reportType,
         title:`${reportType==="attendance"?"Attendance":"Chop Money"} Report — ${month}`,
         body:text,
-        fromUser:user,
-        toRole:"coo",
         dept:"HR",
         period:month
       });
+      const inboxStatus=submission.notificationRecipients>0
+        ?`Report saved to COO inbox; ${submission.notificationRecipients} active COO account(s) notified.`
+        :"Report saved to COO inbox, but no active approved COO account could be notified.";
 
       if(method==="whatsapp"){
         if(!/^\d{10,15}$/.test(COO_WHATSAPP)){
-          showToast("Report submitted to COO in-app. WhatsApp delivery is unavailable until an authorized administrator configures and verifies the COO number.","warn");
+          showToast(inboxStatus+" WhatsApp delivery remains unavailable until a verified COO number is configured.","warn");
         } else {
           window.open(`https://wa.me/${COO_WHATSAPP}?text=${encodeURIComponent(text)}`,"_blank");
-          showToast("Report submitted in-app; WhatsApp opened. Confirm delivery in WhatsApp.","warn");
+          showToast(inboxStatus+" WhatsApp opened; confirm sending in WhatsApp.","warn");
         }
       } else if(method==="email"){
         if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(COO_EMAIL)){
-          showToast("Report submitted to COO in-app. Email delivery is unavailable until an authorized administrator configures and verifies the COO address.","warn");
+          showToast(inboxStatus+" Email delivery remains unavailable until a verified COO address is configured.","warn");
         } else {
           const sub=encodeURIComponent(`KKTR ${reportType==="attendance"?"Attendance":"Chop Money"} Report — ${month}`);
           window.open(`mailto:${COO_EMAIL}?subject=${sub}&body=${encodeURIComponent(text)}`,"_blank");
-          showToast("Report submitted in-app; email composer opened. Confirm sending in your email app.","warn");
+          showToast(inboxStatus+" Email composer opened; confirm sending in your email app.","warn");
         }
       } else {
-        showToast("Report submitted to COO in-app.");
+        showToast(inboxStatus,submission.notificationRecipients>0?"ok":"warn");
       }
     } catch(e){ showToast("Failed: "+e.message,"danger"); }
     setLoading(false);
