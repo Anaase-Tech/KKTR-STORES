@@ -8,9 +8,27 @@ const app = fs.readFileSync(path.join(root, "src/App.js"), "utf8");
 const entry = fs.readFileSync(path.join(root, "src/index.js"), "utf8");
 const serviceWorker = fs.readFileSync(path.join(root, "public/sw.js"), "utf8");
 
-test("a missing administrator account fails closed instead of being created by login", () => {
-  assert.match(app, /Administrator account is not provisioned/);
+test("browser sign-in delegates credentials to Firebase Auth callables", () => {
+  assert.match(app, /callBackend\("authenticateUser"/);
+  assert.match(app, /signInWithCustomToken\(auth,payload\.token\)/);
+  assert.match(app, /onAuthStateChanged\(auth/);
+  assert.doesNotMatch(app, /async function hashPwd\(/);
+  assert.doesNotMatch(app, /cached\.pwdHash===pwdHash/);
   assert.doesNotMatch(app, /await setDoc\(doc\(db,"users",ADMIN_USER\),adminDoc\)/);
+});
+
+test("account registration and password lifecycle use server-side callables", () => {
+  for (const name of ["registerDepartmentHead","requestPasswordReset","approveDepartmentHead","deleteAccount","resetUserPassword","changeOwnPassword","setAccountRole"]) {
+    assert.match(app, new RegExp('callBackend\\("' + name + '"'));
+  }
+  assert.doesNotMatch(app, /await updateDoc\(doc\(db,"users",target\.id\)/);
+});
+
+test("cached session profiles exclude credential fields", () => {
+  assert.match(app, /delete safe\.pwdHash/);
+  assert.match(app, /delete safe\.pendingPasswordReset/);
+  assert.match(app, /if\(!navigator\.onLine&&cachedMatches\)/);
+  assert.match(app, /await signOut\(auth\)/);
 });
 
 test("application code does not unregister the PWA service worker", () => {
@@ -131,4 +149,32 @@ test("dependency audit summarizer emits findings from npm's JSON report", () => 
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
+});
+
+
+test("server credential storage uses scrypt and legacy hashes are migration-only", () => {
+  const passwordHelpers = fs.readFileSync(path.join(root, "functions/src/passwords.js"), "utf8");
+  const functionsSource = fs.readFileSync(path.join(root, "functions/index.js"), "utf8");
+  assert.match(passwordHelpers, /algorithm: "scrypt"/);
+  assert.match(passwordHelpers, /timingSafeEqual/);
+  assert.match(functionsSource, /collection\("userCredentials"\)/);
+  assert.match(functionsSource, /verifyLegacyPassword/);
+  assert.match(functionsSource, /pwdHash: FieldValue\.delete\(\)/);
+  assert.doesNotMatch(functionsSource, /return\s+\{[^}]*pwdHash:/);
+});
+
+test("password reset and login endpoints are rate-limited and avoid username enumeration", () => {
+  const functionsSource = fs.readFileSync(path.join(root, "functions/index.js"), "utf8");
+  assert.match(functionsSource, /assertRateLimit\("login"/);
+  assert.match(functionsSource, /assertRateLimit\("password-reset"/);
+  assert.match(functionsSource, /Do not reveal whether a given username exists/);
+  assert.match(functionsSource, /Too many attempts/);
+});
+
+test("factory reset cannot directly delete production records from the browser", () => {
+  const settingsStart = app.indexOf("function SettingsModule(");
+  const settingsEnd = app.indexOf("// ─── ERROR BOUNDARY", settingsStart);
+  const settings = app.slice(settingsStart, settingsEnd);
+  assert.match(settings, /Factory reset is disabled/);
+  assert.doesNotMatch(settings, /for\\(const col of \\["transactions","requisitions","receipts","chopMoney"/);
 });
