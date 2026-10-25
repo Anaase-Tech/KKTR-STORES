@@ -618,7 +618,7 @@ function RegisterScreen({onBack}){
         ?"That username is already registered."
         :e?.message||"Registration could not be completed.";
       showToast(message,"danger");
-    } finally { setLoading(false); }    } catch(e){ showToast("Failed: "+e.message,"danger"); setLoading(false); }
+    } finally { setLoading(false); }
   };
   return(
     <div style={{minHeight:"100vh",
