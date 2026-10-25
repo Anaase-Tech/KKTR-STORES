@@ -2126,6 +2126,7 @@ function DeptInbox({user}){
 // threadId = e.g. "Chainsaw_admin"
 // myRole = "admin"|"hr"|"coo" for staff, or dept name for dept heads
 function ChatThread({threadId,label,user,myRole,onBack}){
+  const [toastEl,showToast]=useToast();
   const [msgs,setMsgs]=useState(()=>{
     try {
       const cached=localStorage.getItem(`kktr_chat_${threadId}`);
@@ -2202,6 +2203,7 @@ function ChatThread({threadId,label,user,myRole,onBack}){
 
   return(
     <div style={{display:"flex",flexDirection:"column",height:"calc(100vh - 116px)"}}>
+      {toastEl}
       {/* Header */}
       <div style={{padding:"10px 12px",
         background:`linear-gradient(90deg,${C.forest},${C.bark})`,
