@@ -73,7 +73,7 @@ test("COO report delivery uses a consistent schema and does not claim failed wri
   assert.match(coo, /r\.targetRole==="coo"\|\|r\.toRole==="coo"/);
   assert.match(coo, /detail\.body\|\|detail\.text\|\|detail\.reportText/);
   const dashboardStart = app.indexOf("function COODashboard(");
-  const dashboardEnd = app.indexOf("\\nfunction ", dashboardStart + 1);
+  const dashboardEnd = app.indexOf("\nfunction ", dashboardStart + 1);
   const dashboard = app.slice(dashboardStart, dashboardEnd < 0 ? app.length : dashboardEnd);
   assert.match(dashboard, /r\.targetRole==="coo"\|\|r\.toRole==="coo"/);
   assert.doesNotMatch(app, /233XXXXXXXXX|coo@kktr\.com/);
