@@ -768,17 +768,23 @@ function Dashboard({user,onNav}){
     setLoading(true);
     try {
       const lubeRef=doc(db,"lubricants",qf.lubeId);
-      await runTransaction(db,async(tx)=>{
-        const snap=await tx.get(lubeRef);
-        if(!snap.exists()) throw new Error("Lubricant not found");
-        const current=snap.data().currentStock||0;
-        if(current<qty) throw new Error(`Not enough stock! Only ${current} ${snap.data().unit} left.`);
-        tx.update(lubeRef,{currentStock:increment(-qty)});
-      });
-      await addDoc(collection(db,"transactions"),{
+      const transactionRef=doc(collection(db,"transactions"));
+      const transactionData={
         type:"lube",action:"issue",itemId:qf.lubeId,itemName:lube.name,
         qty,unit:lube.unit,takenBy:qf.takenBy,equipment:qf.equipment||"",
         issuedBy:user?.name||"Unknown",date:today(),createdAt:serverTimestamp()
+      };
+      await runTransaction(db,async(tx)=>{
+        const snap=await tx.get(lubeRef);
+        if(!snap.exists()) throw new Error("Lubricant not found");
+        const current=Number(snap.data().currentStock)||0;
+        if(current<qty) throw new Error(`Not enough stock! Only ${current} ${snap.data().unit} left.`);
+        tx.update(lubeRef,{
+          currentStock:current-qty,
+          lastTransactionId:transactionRef.id,
+          updatedAt:serverTimestamp()
+        });
+        tx.set(transactionRef,transactionData);
       });
       showToast("✅ Issued!");
       setQf({lubeId:"",qty:"",takenBy:"",equipment:""});
@@ -1076,59 +1082,78 @@ function LubesModule({user}){
   const doTx=async(action)=>{
     if(!form.lubeId||!form.qty) return showToast("Select lubricant and enter quantity","warn");
     if(action==="issue"&&!form.takenBy) return showToast("Enter who is taking the lubricant","warn");
-    const qty=parseFloat(form.qty);
-    if(qty<=0||isNaN(qty)) return showToast("Invalid quantity","warn");
+    const qty=Number(form.qty);
+    if(!Number.isFinite(qty)||qty<=0) return showToast("Invalid quantity","warn");
     const lube=lubes.find(l=>l.id===form.lubeId);
     if(!lube) return;
     setLoading(true);
+    const transactionRef=doc(collection(db,"transactions"));
     const txData={
       type:"lube",action,itemId:form.lubeId,itemName:lube.name,
       qty,unit:lube.unit,takenBy:form.takenBy||"",
       equipment:form.equipment||"",desc:form.desc||"",
-      issuedBy:user?.name||"Unknown",date:today(),
-      createdAt:navigator.onLine?serverTimestamp():new Date().toISOString()
+      issuedBy:user?.name||user?.username||"Unknown",date:today(),
+      createdAt:serverTimestamp()
     };
     try {
       const lubeRef=doc(db,"lubricants",form.lubeId);
       await runTransaction(db,async(tx)=>{
         const snap=await tx.get(lubeRef);
         if(!snap.exists()) throw new Error("Lubricant not found");
-        const current=snap.data().currentStock||0;
-        if(action==="issue"&&current<qty)
-          throw new Error(`Not enough stock! Only ${current} ${snap.data().unit} left.`);
-        tx.update(lubeRef,{currentStock:increment(action==="restock"?qty:-qty)});
+        const current=Number(snap.data().currentStock)||0;
+        const next=current+(action==="restock"?qty:-qty);
+        if(next<0) throw new Error("Not enough stock. The current balance is "+current+" "+(snap.data().unit||"units")+".");
+        tx.update(lubeRef,{
+          currentStock:next,
+          lastTransactionId:transactionRef.id,
+          updatedAt:serverTimestamp()
+        });
+        tx.set(transactionRef,txData);
       });
-      await addDoc(collection(db,"transactions"),txData);
       showToast(action==="issue"?"✅ Issued!":"✅ Restocked!");
       setForm({lubeId:"",qty:"",takenBy:"",equipment:"",desc:""});
     } catch(e){
       if(!navigator.onLine){
-        // Firestore runTransaction cannot safely complete offline. Do not enqueue
-        // only the ledger row or change the displayed stock without a committed
-        // stock mutation; both would report a false inventory result.
-        showToast("Stock changes require a live connection to verify availability and record the stock balance safely. Reconnect and retry.","warn");
-      } else {
+        showToast("Stock changes require a live connection to commit the balance and ledger together. Reconnect and retry.","warn");
+      }else{
         showToast(e.message||"Failed","danger");
       }
-    }
-    setLoading(false);
+    } finally { setLoading(false); }
   };
 
   const deleteTx=async(tx)=>{
-    if(!window.confirm("Delete this transaction? Stock will be reversed.")) return;
-    try {
+    if(!window.confirm("Post a permanent reversal for this transaction? The original audit entry will be retained.")) return;
+    const reverseAction=tx.action==="issue"?"restock":"issue";
+    const reversalRef=doc(db,"transactions","reversal_"+tx.id);
+    try{
       const lubeRef=doc(db,"lubricants",tx.itemId);
       await runTransaction(db,async(t)=>{
-        const snap=await t.get(lubeRef);
-        if(snap.exists())
-          t.update(lubeRef,{currentStock:increment(tx.action==="issue"?tx.qty:-tx.qty)});
+        const [stockSnap,reversalSnap]=await Promise.all([t.get(lubeRef),t.get(reversalRef)]);
+        if(!stockSnap.exists()) throw new Error("Lubricant no longer exists.");
+        if(reversalSnap.exists()) throw new Error("This transaction has already been reversed.");
+        const current=Number(stockSnap.data().currentStock)||0;
+        const next=current+(reverseAction==="restock"?Number(tx.qty):-Number(tx.qty));
+        if(next<0) throw new Error("Cannot reverse this restock because the current balance is lower than the quantity being reversed.");
+        t.update(lubeRef,{
+          currentStock:next,
+          lastTransactionId:reversalRef.id,
+          updatedAt:serverTimestamp()
+        });
+        t.create(reversalRef,{
+          ...tx,
+          id:reversalRef.id,
+          action:reverseAction,
+          reversedBy:user?.name||user?.username||"Unknown",
+          reversalOf:tx.id,
+          reversalReason:"Reversal of transaction "+tx.id,
+          createdAt:serverTimestamp()
+        });
       });
-      await deleteDoc(doc(db,"transactions",tx.id));
-      showToast("Deleted and stock reversed.");
-    } catch(e){ showToast("Failed: "+e.message,"danger"); }
+      showToast("Reversal posted. The original audit record was retained.");
+    }catch(e){ showToast("Reversal failed: "+e.message,"danger"); }
   };
 
-  const ftx=txs.filter(t=>
+    const ftx=txs.filter(t=>
     (!fDept||t.dept===fDept)&&
     (!fFrom||tsToStr(t.createdAt)>=fFrom)&&
     (!fTo||tsToStr(t.createdAt)<=fTo));
@@ -1296,48 +1321,73 @@ function StoresModule({user}){
     if(!form.itemId||!form.qty) return showToast("Select item and enter quantity","warn");
     if(action==="issue"&&(!form.takenBy||!form.dept))
       return showToast("Taken-by and department required","warn");
-    const qty=parseFloat(form.qty);
-    if(qty<=0||isNaN(qty)) return showToast("Invalid quantity","warn");
+    const qty=Number(form.qty);
+    if(!Number.isFinite(qty)||qty<=0) return showToast("Invalid quantity","warn");
     const item=items.find(i=>i.id===form.itemId);
     if(!item) return;
     setLoading(true);
-    try {
+    const transactionRef=doc(collection(db,"transactions"));
+    const transactionData={
+      type:"store",action,itemId:form.itemId,itemName:item.name,
+      qty,unit:item.unit||"pcs",takenBy:form.takenBy||"",
+      dept:form.dept||"",desc:form.desc||"",
+      issuedBy:user?.name||user?.username||"Unknown",date:today(),
+      createdAt:serverTimestamp()
+    };
+    try{
       const itemRef=doc(db,"storeItems",form.itemId);
       await runTransaction(db,async(tx)=>{
         const snap=await tx.get(itemRef);
         if(!snap.exists()) throw new Error("Item not found");
-        const current=snap.data().currentStock||0;
-        if(action==="issue"&&current<qty)
-          throw new Error(`Not enough stock! Only ${current} ${snap.data().unit||"pcs"} left.`);
-        tx.update(itemRef,{currentStock:increment(action==="restock"?qty:-qty)});
-      });
-      await addDoc(collection(db,"transactions"),{
-        type:"store",action,itemId:form.itemId,itemName:item.name,
-        qty,unit:item.unit||"pcs",takenBy:form.takenBy||"",
-        dept:form.dept||"",desc:form.desc||"",
-        issuedBy:user?.name||"Unknown",date:today(),createdAt:serverTimestamp()
+        const current=Number(snap.data().currentStock)||0;
+        const next=current+(action==="restock"?qty:-qty);
+        if(next<0) throw new Error("Not enough stock. The current balance is "+current+" "+(snap.data().unit||"pcs")+".");
+        tx.update(itemRef,{
+          currentStock:next,
+          lastTransactionId:transactionRef.id,
+          updatedAt:serverTimestamp()
+        });
+        tx.set(transactionRef,transactionData);
       });
       showToast(action==="issue"?"✅ Issued!":"✅ Restocked!");
       setForm({itemId:"",qty:"",takenBy:"",dept:"",desc:""});
-    } catch(e){ showToast(e.message||"Failed","danger"); }
-    setLoading(false);
+    }catch(e){ showToast(e.message||"Failed","danger"); }
+    finally{ setLoading(false); }
   };
 
   const deleteTx=async(tx)=>{
-    if(!window.confirm("Delete? Stock will be reversed.")) return;
-    try {
+    if(!window.confirm("Post a permanent reversal for this transaction? The original audit entry will be retained.")) return;
+    const reverseAction=tx.action==="issue"?"restock":"issue";
+    const reversalRef=doc(db,"transactions","reversal_"+tx.id);
+    try{
       const itemRef=doc(db,"storeItems",tx.itemId);
       await runTransaction(db,async(t)=>{
-        const snap=await t.get(itemRef);
-        if(snap.exists())
-          t.update(itemRef,{currentStock:increment(tx.action==="issue"?tx.qty:-tx.qty)});
+        const [stockSnap,reversalSnap]=await Promise.all([t.get(itemRef),t.get(reversalRef)]);
+        if(!stockSnap.exists()) throw new Error("Stock item no longer exists.");
+        if(reversalSnap.exists()) throw new Error("This transaction has already been reversed.");
+        const current=Number(stockSnap.data().currentStock)||0;
+        const next=current+(reverseAction==="restock"?Number(tx.qty):-Number(tx.qty));
+        if(next<0) throw new Error("Cannot reverse this restock because the current balance is lower than the quantity being reversed.");
+        t.update(itemRef,{
+          currentStock:next,
+          lastTransactionId:reversalRef.id,
+          updatedAt:serverTimestamp()
+        });
+        t.create(reversalRef,{
+          ...tx,
+          id:reversalRef.id,
+          action:reverseAction,
+          reversedBy:user?.name||user?.username||"Unknown",
+          reversalOf:tx.id,
+          reversalReason:"Reversal of transaction "+tx.id,
+          createdAt:serverTimestamp()
+        });
       });
-      await deleteDoc(doc(db,"transactions",tx.id));
-      showToast("Deleted.");
-    } catch(e){ showToast("Failed: "+e.message,"danger"); }
+      showToast("Reversal posted. The original audit record was retained.");
+    }catch(e){ showToast("Reversal failed: "+e.message,"danger"); }
   };
 
-  const filtered=items.filter(i=>i.name.toLowerCase().includes(search.toLowerCase()));
+    const filtered=items.filter(i=>i.name.toLowerCase().includes(search.toLowerCase()));
 
   return(
     <div style={{padding:"0 12px 80px"}}>
