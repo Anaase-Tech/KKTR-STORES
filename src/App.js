@@ -3309,14 +3309,6 @@ function ReportsModule({user}){
     try {
       const {from:f2,to:t2}=getRange();
       const pLabel={daily:"Daily",weekly:"Weekly",monthly:"Monthly",annual:"Annual",custom:"Custom"}[period];
-      const summary={
-        lubesIssued:lubeIssued.length,
-        storeIssued:storeIssued.length,
-        requisitions:reqs.length,
-        receipts:receipts.length,
-        totalReceipts:totalAmt,
-        lowStockCount:lowLubes.length+lowStore.length,
-      };
       const submission=await sendInAppReport({
         type:"stores",
         title:`${pLabel} Stores Report`,
