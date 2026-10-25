@@ -606,22 +606,21 @@ function RegisterScreen({onBack}){
     if(!f.name||!f.dept||!f.username||!f.password)
       return showToast("All fields required","warn");
     if(f.password!==f.confirm) return showToast("Passwords don't match","warn");
-    if(f.password.length<6) return showToast("Password min 6 characters","warn");
+    if(f.password.length<12) return showToast("Password must contain at least 12 characters","warn");
     const uname=f.username.trim().toLowerCase();
     setLoading(true);
     try {
-      const existing=await getDoc(doc(db,"users",uname));
-      if(existing.exists()){
-        showToast("Username already taken","danger"); setLoading(false); return;
-      }
-      const pwdHash=await hashPwd(f.password);
-      await setDoc(doc(db,"users",uname),{
-        id:uname,username:uname,name:f.name,dept:f.dept,
-        role:"dept",approved:false,pwdHash,createdAt:serverTimestamp()
+      await callBackend("registerDepartmentHead",{
+        username:uname,name:f.name.trim(),dept:f.dept,password:f.password
       });
-      showToast("✅ Registered! Waiting for admin approval.");
+      showToast("Registration submitted. The administrator must approve the account before sign-in.");
       setTimeout(onBack,2500);
-    } catch(e){ showToast("Failed: "+e.message,"danger"); setLoading(false); }
+    } catch(e){
+      const message=e?.code==="functions/already-exists"
+        ?"That username is already registered."
+        :e?.message||"Registration could not be completed.";
+      showToast(message,"danger");
+    } finally { setLoading(false); }    } catch(e){ showToast("Failed: "+e.message,"danger"); setLoading(false); }
   };
   return(
     <div style={{minHeight:"100vh",
@@ -646,7 +645,7 @@ function RegisterScreen({onBack}){
           onChange={e=>ff("username",e.target.value)}
           placeholder="firstname.lastname" autoCapitalize="none"/>
         <Inp label="Password *" type="password" value={f.password}
-          onChange={e=>ff("password",e.target.value)} placeholder="Min 6 characters"/>
+          onChange={e=>ff("password",e.target.value)} placeholder="Minimum 12 characters"/>
         <Inp label="Confirm Password *" type="password" value={f.confirm}
           onChange={e=>ff("confirm",e.target.value)}/>
         <Btn onClick={submit} loading={loading}
@@ -670,15 +669,12 @@ function ForgotScreen({onBack}){
     setLoading(true);
     const uname=username.trim().toLowerCase();
     try {
-      const snap=await getDoc(doc(db,"users",uname));
-      if(!snap.exists()){ showToast("Username not found","danger"); setLoading(false); return; }
-      const data=snap.data();
-      await addDoc(collection(db,"passwordResets"),{
-        userId:uname,username:uname,name:data.name,dept:data.dept,
-        status:"pending",requestedAt:serverTimestamp()
-      });
+      // The server acknowledges identically whether the username exists or not.
+      await callBackend("requestPasswordReset",{username:uname});
       setSent(true);
-    } catch(e){ showToast("Failed: "+e.message,"danger"); }
+    } catch(e){
+      showToast("The request could not be submitted. Reconnect and try again.","danger");
+    } finally { setLoading(false); }    } catch(e){ showToast("Failed: "+e.message,"danger"); }
     setLoading(false);
   };
   return(
