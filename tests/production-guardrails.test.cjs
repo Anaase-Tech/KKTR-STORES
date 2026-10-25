@@ -215,6 +215,20 @@ test("account settings effect declares its stable toast dependency", () => {
   assert.match(settings, /\},\[user,showToast\]\);/);
 });
 
+test("Storage receipt object rules match uploaded .jpg paths and receive emulator coverage", () => {
+  const storageRules = fs.readFileSync(path.join(root, "storage.rules"), "utf8");
+  const securityTests = fs.readFileSync(path.join(root, "tests/security/rules.test.cjs"), "utf8");
+  const workflow = fs.readFileSync(path.join(root, ".github/workflows/quality-gate.yml"), "utf8");
+  assert.ok(storageRules.includes("match /receipts/{receiptObject}"));
+  assert.ok(storageRules.includes("receiptObject.split("));
+  assert.match(storageRules, /function isReceiptImage\(receiptObject\)/);
+  assert.ok(app.includes("receipts/" + "$" + "{docRef.id}" + ".jpg"));
+  assert.match(securityTests, /receipt image paths enforce department access/);
+  assert.match(securityTests, /env\.clearStorage\(\)/);
+  assert.match(workflow, /--only firestore,storage/);
+});
+
+
 test("account administration uses the sanitized live directory, never raw profile-list reads", () => {
   assert.match(app, /callBackend\("listAccounts",\{\}\)/);
   assert.match(app, /collection\(db,"accountDirectory"\)/);
