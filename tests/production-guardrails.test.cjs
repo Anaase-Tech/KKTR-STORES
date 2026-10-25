@@ -54,6 +54,33 @@ test("report title and content are HTML-escaped before printing", () => {
   assert.match(app, /<pre>\$\{escapeHTML\(content\)\}<\/pre>/);
 });
 
+test("report creation uses a trusted server callable and private recipient fan-out", () => {
+  const functionsSource = fs.readFileSync(path.join(root, "functions/index.js"), "utf8");
+  const rules = fs.readFileSync(path.join(root, "firestore.rules"), "utf8");
+  assert.match(app, /callBackend\("submitReportToCOO"/);
+  assert.doesNotMatch(app, /addDoc\(collection\(db,"reports"\)/);
+  assert.match(functionsSource, /exports\.submitReportToCOO = onCall/);
+  assert.match(functionsSource, /transaction\.create\(reportRef, report\)/);
+  assert.match(functionsSource, /toUserId: recipient\.uid/);
+  assert.match(functionsSource, /createdByUid: uid/);
+  const reportRuleStart = rules.indexOf("match /reports/{id}");
+  const reportRuleEnd = rules.indexOf("match /notifications/{id}", reportRuleStart);
+  const reportRule = rules.slice(reportRuleStart, reportRuleEnd);
+  assert.match(reportRule, /allow create: if false/);
+  assert.match(rules, /resource\.data\.keys\(\)\.hasAny\(\['toUserId'\]\)/);
+});
+
+test("HR attendance approval and COO filing are atomic and safely retryable", () => {
+  const functionsSource = fs.readFileSync(path.join(root, "functions/index.js"), "utf8");
+  assert.match(app, /callBackend\("approveAttendanceReportAndSendToCOO"/);
+  assert.doesNotMatch(app, /addDoc\(collection\(db,"reports"\)/);
+  assert.match(functionsSource, /exports\.approveAttendanceReportAndSendToCOO = onCall/);
+  assert.match(functionsSource, /transaction\.update\(sourceRef/);
+  assert.match(functionsSource, /transaction\.create\(reportRef,/);
+  assert.match(functionsSource, /reportSentToCOO: true/);
+  assert.match(functionsSource, /source\.reportId === reportRef\.id && source\.reportSentToCOO === true/);
+});
+
 test("COO report delivery uses a consistent schema and does not claim failed writes succeeded", () => {
   const start = app.indexOf("async function sendInAppReport(");
   const end = app.indexOf("// ─── PDF EXPORT", start);
