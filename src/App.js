@@ -2685,17 +2685,19 @@ function HRReportSender({user}){
 
       if(method==="whatsapp"){
         if(!/^\d{10,15}$/.test(COO_WHATSAPP)){
-          throw new Error("WhatsApp delivery is unavailable until an authorized administrator configures and verifies the COO number.");
+          showToast("Report submitted to COO in-app. WhatsApp delivery is unavailable until an authorized administrator configures and verifies the COO number.","warn");
+        } else {
+          window.open(`https://wa.me/${COO_WHATSAPP}?text=${encodeURIComponent(text)}`,"_blank");
+          showToast("Report submitted in-app; WhatsApp opened. Confirm delivery in WhatsApp.","warn");
         }
-        window.open(`https://wa.me/${COO_WHATSAPP}?text=${encodeURIComponent(text)}`,"_blank");
-        showToast("WhatsApp opened. Confirm delivery in WhatsApp; opening it does not mean the report was delivered.","warn");
       } else if(method==="email"){
         if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(COO_EMAIL)){
-          throw new Error("Email delivery is unavailable until an authorized administrator configures and verifies the COO address.");
+          showToast("Report submitted to COO in-app. Email delivery is unavailable until an authorized administrator configures and verifies the COO address.","warn");
+        } else {
+          const sub=encodeURIComponent(`KKTR ${reportType==="attendance"?"Attendance":"Chop Money"} Report — ${month}`);
+          window.open(`mailto:${COO_EMAIL}?subject=${sub}&body=${encodeURIComponent(text)}`,"_blank");
+          showToast("Report submitted in-app; email composer opened. Confirm sending in your email app.","warn");
         }
-        const sub=encodeURIComponent(`KKTR ${reportType==="attendance"?"Attendance":"Chop Money"} Report — ${month}`);
-        window.open(`mailto:${COO_EMAIL}?subject=${sub}&body=${encodeURIComponent(text)}`,"_blank");
-        showToast("Email composer opened. Confirm sending in your email app.","warn");
       } else {
         showToast("Report submitted to COO in-app.");
       }
