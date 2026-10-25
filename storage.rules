@@ -8,7 +8,8 @@ service firebase.storage {
     function active() {
       return signedIn() &&
         firestore.exists(profilePath()) &&
-        firestore.get(profilePath()).data.disabled != true;
+        firestore.get(profilePath()).data.disabled != true &&
+        request.auth.token.sessionVersion == firestore.get(profilePath()).data.get('sessionVersion', 0);
     }
     function admin() {
       return active() &&
