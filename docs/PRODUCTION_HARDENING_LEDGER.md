@@ -30,18 +30,26 @@ No feature is called production-ready because a screen exists or a local write a
 
 | 2026-10-25 | scripts/summarize-npm-audit.cjs and .github/workflows/quality-gate.yml | Added full and `--omit=dev` npm audit JSON capture, a human-readable summary, and a downloadable audit artifact. | Security risks must be visible and reviewed instead of suppressed or guessed. | Run 40193140852 reported 65 findings (10 low, 18 moderate, 34 high, 3 critical) in both summaries. The equal counts arise because `react-scripts`/Create React App is listed under production dependencies; they are not evidence that every finding affects shipped client code. Advisory triage and migration off the obsolete build tool remain open. |
 
+## Phase-two change log — reporting integrity
+
+| When | Where | What changed | Why | How verified / owner |
+|---|---|---|---|---|
+| 2026-10-25 | `src/App.js` — shared `sendInAppReport` | Report and notification documents are written in one Firestore transaction. Report records now carry both `toRole` and `targetRole` for compatibility, plus `submittedBy`, `fromDept`, and `period`. Write failures propagate to the caller instead of being swallowed. | Previously, the helper could swallow a failed write while the UI showed success; the report inbox queried a different recipient field than HR wrote. | Added a regression guard in `tests/production-guardrails.test.cjs`. Current commit must pass CI and the workflow must be tested with HR, Stores, and COO accounts in the Firebase Emulator Suite and a controlled Firebase project. |
+| 2026-10-25 | `src/App.js` — HR report delivery | Removed hard-coded placeholder WhatsApp/email contacts. In-app report submission remains available; external delivery is explicitly reported as unavailable until a verified contact is configured. UI copy distinguishes opening an external app from actual delivery. | A placeholder number/address must never be presented as a working destination, and opening WhatsApp/email is not proof of delivery. | Regression guard asserts the known placeholder values are absent. Authorized administrator must supply and verify approved contact details before external delivery can be enabled. |
+| 2026-10-25 | `src/App.js` — COO report detail | Detail view renders report content from `body`, `text`, or `reportText`, preserving visibility for HR records and legacy schemas. | The previous display condition only checked `reportText`, so reports that contained only `body` could show blank detail content. | Regression guard checks all supported body fields; verify with real HR and Stores records before release. |
+
 ## Production blockers still open
 
 These are not claimed to be fixed in phase one. Each must be closed with code, rules, evidence, and documentation before a production sign-off.
 
 ### P0 — Authentication and authorization
 
-- The application still implements its own browser-side username/password hash/session flow instead of Firebase Authentication or a trusted server-side identity provider.
-- Password hashes and role data remain in Firestore documents accessed by client code. A client-only UI check is not an authorization boundary.
-- No versioned firestore.rules, database.rules.json, Storage rules, or Firebase project deployment configuration was present in the audited repository. The actual rules currently deployed in Firebase have **not** been verified here.
-- Do not assume the database is safe because the new login path fails closed. Before production, implement Firebase Authentication, migrate accounts safely, write least-privilege Firestore/Realtime Database/Storage rules, test them in the Firebase Emulator Suite, and deploy only after an authorized review.
-- The Firebase web configuration is still embedded in the client bundle. Firebase web config is not a server secret, but the API key must be appropriately restricted and all data access must be enforced by security rules. Validate that the app is pointed at the intended project rather than assuming the existing kktr-stores-test project is production.
-- If the old firebase_setup.js ever ran, rotate the account credentials it set and review access history. Deleting a file does not erase its Git history.
+- **Implemented in the hardening branch; not yet production-approved:** the browser login calls the `authenticateUser` HTTPS callable and signs in with a Firebase custom token. New password credentials use salted scrypt on the server; the legacy SHA-256 verifier exists only to migrate old credentials after a successful check. The backend contains account lifecycle callables for registration/approval, password reset/change, role changes, account listing/deletion, and worker administration.
+- The server checks the caller's Firebase identity, active profile, role, approval state, and session version for privileged operations. Review each callable and every authorization branch before deployment; passing static tests does not prove the policy is complete.
+- Versioned `firestore.rules`, `storage.rules`, and `firebase.json` now exist on this branch. Firestore rules deny direct client writes to user profiles, credential records, worker records, rate-limit records, and worker-name keys; business collections have role-scoped rules. The quality workflow defines Firestore Emulator Suite tests. The current revision's actual CI result must be checked before merge, and deployed Firebase rules have **not** been independently read or verified.
+- The Firebase web configuration remains in the client bundle. It is not a server secret, but API-key restrictions and data access controls must be verified. Confirm the intended Firebase project before deploying; do not assume `kktr-stores-test` is production.
+- The removed `firebase_setup.js` may remain in Git history. If it was ever run, rotate affected credentials and inspect access history. Account migration must be rehearsed against a controlled copy of real records, with rollback and audit evidence.
+
 
 ### P0 — Build and release evidence
 
@@ -77,12 +85,12 @@ These are not claimed to be fixed in phase one. Each must be closed with code, r
 
 ## Release sequence (recommended)
 
-1. **Security foundation:** confirm project/environment, deploy reviewed Firebase Authentication migration, least-privilege rules, server-side role checks, and emulator tests. Review/rotate any credentials created by the removed seed script.
-2. **Build integrity:** obtain green GitHub Actions results with lint enabled; resolve all real errors without bypasses.
-3. **Inventory correctness:** durable idempotent outbox and atomic stock/ledger workflow, with offline/online reconciliation tests.
-4. **Business workflow correctness:** canonical report schema, approved-only chop-money calculations, duplicate-submission protection, reliable in-app notifications, and true stored PDFs.
-5. **Operational messaging:** real FCM push and validated WhatsApp/email configuration.
-6. **Acceptance testing:** role-by-role test matrix, real Firebase test project, deployed-origin PWA/offline tests, backups/restore drill, monitoring, and documented rollback.
+1. **Security verification:** review the new callable authentication/account lifecycle code and least-privilege Firestore/Storage rules; get a green current CI run including emulator tests; verify actual deployed rules and intended Firebase project; rehearse account migration and recovery.
+2. **Build and dependency integrity:** obtain green GitHub Actions results with lint enabled; triage all 65 previously reported dependency findings and migrate from the deprecated Create React App toolchain in a separate tested change.
+3. **Inventory correctness:** durable idempotent IndexedDB outbox and atomic stock/ledger workflow, with offline/online reconciliation tests.
+4. **Business workflow correctness:** verify the new canonical report writes with HR/Stores/COO accounts, finish the notification routing, preserve approved-only chop-money calculations, and generate real stored PDF artifacts.
+5. **Operational messaging:** real FCM push, verified WhatsApp/email configuration, and truthful delivery status.
+6. **Acceptance testing:** role-by-role test matrix, controlled Firebase project, deployed-origin PWA/offline tests, backups/restore drill, monitoring, and documented rollback.
 
 ## Roles and change control
 
