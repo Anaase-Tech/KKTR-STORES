@@ -19,6 +19,11 @@ const {
   updateDoc,
   writeBatch
 } = require("firebase/firestore");
+const {
+  ref: storageRef,
+  uploadBytes,
+  getBytes
+} = require("firebase/storage");
 
 const projectId = "demo-kktr-rules";
 const root = path.resolve(__dirname, "../..");
@@ -29,6 +34,9 @@ test.before(async () => {
     projectId,
     firestore: {
       rules: fs.readFileSync(path.join(root, "firestore.rules"), "utf8")
+    },
+    storage: {
+      rules: fs.readFileSync(path.join(root, "storage.rules"), "utf8")
     }
   });
 });
@@ -39,6 +47,7 @@ test.after(async () => {
 
 test.beforeEach(async () => {
   await env.clearFirestore();
+  await env.clearStorage();
   await env.withSecurityRulesDisabled(async context => {
     const db = context.firestore();
     const accounts = [
@@ -208,6 +217,48 @@ test("receipts cannot be read across department boundaries", async () => {
   await assertSucceeds(getDoc(doc(asUser("yard-head"), "receipts", "receipt-yard")));
   await assertFails(getDoc(doc(asUser("yard-head"), "receipts", "receipt-mill")));
   await assertSucceeds(getDoc(doc(asUser("hr"), "receipts", "receipt-mill")));
+});
+
+test("receipt image paths enforce department access and reject unsupported objects", async () => {
+  const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+  const yardStorage = asUser("yard-head").storage();
+  const adminStorage = asUser("admin").storage();
+  const hrStorage = asUser("hr").storage();
+
+  await assertSucceeds(uploadBytes(
+    storageRef(yardStorage, "receipts/receipt-yard.jpg"),
+    bytes,
+    { contentType: "image/jpeg" }
+  ));
+  await assertFails(uploadBytes(
+    storageRef(yardStorage, "receipts/receipt-mill.jpg"),
+    bytes,
+    { contentType: "image/jpeg" }
+  ));
+  await assertFails(uploadBytes(
+    storageRef(yardStorage, "receipts/receipt-yard.pdf"),
+    bytes,
+    { contentType: "application/pdf" }
+  ));
+  await assertFails(uploadBytes(
+    storageRef(yardStorage, "private/receipt-yard.jpg"),
+    bytes,
+    { contentType: "image/jpeg" }
+  ));
+  await assertFails(uploadBytes(
+    storageRef(yardStorage, "receipts/receipt-yard.jpg"),
+    bytes,
+    { contentType: "text/plain" }
+  ));
+
+  await assertSucceeds(uploadBytes(
+    storageRef(adminStorage, "receipts/receipt-mill.jpg"),
+    bytes,
+    { contentType: "image/jpeg" }
+  ));
+  await assertSucceeds(getBytes(storageRef(yardStorage, "receipts/receipt-yard.jpg")));
+  await assertFails(getBytes(storageRef(yardStorage, "receipts/receipt-mill.jpg")));
+  await assertSucceeds(getBytes(storageRef(hrStorage, "receipts/receipt-mill.jpg")));
 });
 
 test("department chat access is limited to that department's staff threads", async () => {
