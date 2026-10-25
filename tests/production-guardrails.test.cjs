@@ -81,6 +81,20 @@ test("COO report delivery uses a consistent schema and does not claim failed wri
 });
 
 
+test("offline attendance retries are stable, idempotent, JSON-safe, and preserve failures", () => {
+  const start = app.indexOf("function queueOffline(");
+  const end = app.indexOf("// ─── OFFLINE CHAT QUEUE", start);
+  assert.ok(start >= 0 && end > start, "attendance queue engine must exist");
+  const queue = app.slice(start, end);
+  assert.match(queue, /collectionName !== "attendance"/);
+  assert.match(queue, /existing\.data\._docId === data\._docId/);
+  assert.match(queue, /getDocFromServer\(target\)/);
+  assert.match(queue, /remaining\.push\(item\)/);
+  assert.doesNotMatch(queue, /await addDoc\(collection\(db, item\.collection\)/);
+  assert.match(app, /queueOffline\("attendance",\{\.\.\.data,createdAt:new Date\(\)\.toISOString\(\),_docId:docId\}\)/);
+  assert.match(app, /const transientNetworkFailure=!navigator\.onLine/);
+});
+
 test("service-worker shell refers to real public icon files", () => {
   const match = serviceWorker.match(/const SHELL_URLS = \[([\s\S]*?)\];/);
   assert.ok(match, "service-worker shell URL list must exist");
