@@ -995,6 +995,9 @@ exports.approveAttendanceReportAndSendToCOO = onCall({ maxInstances: 5 }, async 
       "TOTALS: " + totalPresent + " present | " + totalAbsent +
         " absent | GH₵" + totalChopMoney + " chop money"
     ].join("\n");
+    if (body.length > 100000) {
+      fail("resource-exhausted", "The generated attendance report exceeds the 100,000-character limit.");
+    }
 
     transaction.create(reportRef, {
       type: "attendance",
