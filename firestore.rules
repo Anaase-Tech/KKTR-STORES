@@ -1,0 +1,205 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function profilePath() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+    function hasProfile() { return signedIn() && exists(profilePath()); }
+    function profile() { return get(profilePath()).data; }
+    function active() { return hasProfile() && profile().disabled != true; }
+    function isRole(r) { return active() && profile().role == r; }
+    function isAdmin() { return isRole('admin') && profile().approved == true; }
+    function isHR() { return isRole('hr'); }
+    function isCOO() { return isRole('coo'); }
+    function isStores() { return isAdmin() || isRole('store_manager'); }
+    function isStaff() { return isAdmin() || isHR() || isCOO() || isRole('store_manager'); }
+    function isDeptHead() { return isRole('dept') && profile().approved == true; }
+    function sameDept(data) { return active() && data.dept == profile().dept; }
+    function validDept(dept) {
+      return dept in ['Log Yard','Sawmill','Saw Shop','Workshop','Charcoal',
+        'Kindry','Chainsaw','Security','Administration','HR'];
+    }
+    function pairedStockChange(stockPath, transactionId) {
+      let before = get(stockPath);
+      let after = getAfter(stockPath);
+      let tx = getAfter(/databases/$(database)/documents/transactions/$(transactionId));
+      return before.exists() && after.exists() && tx.exists() &&
+        after.data.lastTransactionId == transactionId &&
+        tx.data.qty is number && tx.data.qty > 0 &&
+        ((tx.data.action == 'issue' &&
+          after.data.currentStock == before.data.currentStock - tx.data.qty) ||
+         (tx.data.action == 'restock' &&
+          after.data.currentStock == before.data.currentStock + tx.data.qty));
+    }
+    function validLubeUpdate(id) {
+      return isStores() &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['currentStock','lastTransactionId','updatedAt']) &&
+        request.resource.data.currentStock is number && request.resource.data.currentStock >= 0 &&
+        request.resource.data.lastTransactionId is string &&
+        pairedStockChange(/databases/$(database)/documents/lubricants/$(id),
+          request.resource.data.lastTransactionId);
+    }
+    function validStoreUpdate(id) {
+      return isStores() &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['currentStock','lastTransactionId','updatedAt']) &&
+        request.resource.data.currentStock is number && request.resource.data.currentStock >= 0 &&
+        request.resource.data.lastTransactionId is string &&
+        pairedStockChange(/databases/$(database)/documents/storeItems/$(id),
+          request.resource.data.lastTransactionId);
+    }
+
+    match /users/{username} {
+      allow get: if active() && request.auth.uid == username;
+      allow list, create, update, delete: if false;
+    }
+    match /userCredentials/{id} { allow read, write: if false; }
+    match /_securityRateLimits/{id} { allow read, write: if false; }
+    match /workerNameKeys/{id} { allow read, write: if false; }
+    match /accountDirectory/{username} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    match /settings/{id} {
+      allow get: if active() && (isAdmin() || id == 'company');
+      allow list: if isAdmin();
+      allow create, update: if isAdmin();
+      allow delete: if false;
+    }
+    match /workers/{id} {
+      allow read: if isAdmin() || isHR() || (isDeptHead() && resource.data.dept == profile().dept);
+      allow create, update, delete: if false;
+    }
+    match /attendance/{id} {
+      allow read: if isStaff() || (isDeptHead() && sameDept(resource.data));
+      allow create: if ((isDeptHead() && sameDept(request.resource.data)) || isHR()) &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.workerId is string &&
+        request.resource.data.date is string &&
+        request.resource.data.present is bool &&
+        exists(/databases/$(database)/documents/workers/$(request.resource.data.workerId)) &&
+        get(/databases/$(database)/documents/workers/$(request.resource.data.workerId)).data.dept == request.resource.data.dept;
+      allow update: if (isHR() && resource.data.status == 'pending' &&
+          request.resource.data.status in ['approved','rejected'] &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','approvedBy','approvedAt'])) ||
+        (isDeptHead() && sameDept(resource.data) && resource.data.status == 'pending' &&
+          request.resource.data.status == 'pending' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['present','markedBy','createdAt']));
+      allow delete: if false;
+    }
+    match /attendanceReports/{id} {
+      allow read: if isHR() || isCOO() || isAdmin();
+      allow create: if isHR() && request.resource.data.dept is string;
+      allow update: if isHR() && request.resource.data.diff(resource.data).affectedKeys()
+        .hasOnly(['status','approvedBy','approvedAt']);
+      allow delete: if false;
+    }
+    match /chopMoney/{id} {
+      allow read: if isHR() || isCOO() || isAdmin() ||
+        (isDeptHead() && resource.data.dept == profile().dept);
+      allow create: if isDeptHead() && request.resource.data.dept == profile().dept &&
+        request.resource.data.status == 'pending' && request.resource.data.totalAmount is number;
+      allow update: if isHR() && resource.data.status == 'pending' &&
+        request.resource.data.status in ['approved','paid','rejected'] &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status','approvedBy','approvedAt','paidBy','paidAt','rejectedBy','rejectedAt']);
+      allow delete: if false;
+    }
+    match /lubricants/{id} {
+      allow read: if isStores() || isCOO();
+      allow create: if isStores() && request.resource.data.name is string &&
+        request.resource.data.currentStock is number && request.resource.data.currentStock >= 0;
+      allow update: if validLubeUpdate(id);
+      allow delete: if false;
+    }
+    match /storeItems/{id} {
+      allow read: if active();
+      allow create: if isStores() && request.resource.data.name is string &&
+        request.resource.data.currentStock is number && request.resource.data.currentStock >= 0;
+      allow update: if validStoreUpdate(id);
+      allow delete: if false;
+    }
+    match /transactions/{id} {
+      allow read: if isStores() || isCOO();
+      allow create: if isStores() && request.resource.data.type in ['lube','store'] &&
+        request.resource.data.action in ['issue','restock'] &&
+        request.resource.data.qty is number && request.resource.data.qty > 0 &&
+        ((request.resource.data.type == 'lube' &&
+          pairedStockChange(/databases/$(database)/documents/lubricants/$(request.resource.data.itemId), id)) ||
+         (request.resource.data.type == 'store' &&
+          pairedStockChange(/databases/$(database)/documents/storeItems/$(request.resource.data.itemId), id)));
+      allow update, delete: if false;
+    }
+    match /requisitions/{id} {
+      allow read: if isAdmin() || isCOO() || (active() && resource.data.dept == profile().dept);
+      allow create: if active() && request.resource.data.dept == profile().dept &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.approverRole == (profile().role == 'admin' ? 'coo' : 'admin');
+      allow update: if ((isAdmin() && resource.data.approverRole == 'admin') ||
+          (isCOO() && resource.data.approverRole == 'coo')) &&
+        resource.data.status == 'pending' &&
+        request.resource.data.status in ['approved','rejected'] &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status','approvedBy','approvedRole','approvedAt','rejectedBy','rejectedRole','rejectedAt','rejectionNote']);
+      allow delete: if false;
+    }
+    match /requisitionHistory/{id} {
+      allow read: if isAdmin() || isCOO() || (active() && resource.data.dept == profile().dept);
+      allow create: if (isAdmin() || isCOO()) && request.resource.data.action in ['approved','rejected'];
+      allow update, delete: if false;
+    }
+    match /reports/{id} {
+      allow read: if isAdmin() || isHR() || isCOO();
+      allow create: if active() && (isAdmin() || isHR() || isRole('store_manager')) &&
+        (request.resource.data.toRole == 'coo' || request.resource.data.targetRole == 'coo');
+      allow update: if (isAdmin() || isCOO()) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','reviewedBy','reviewedAt']);
+      allow delete: if false;
+    }
+    match /notifications/{id} {
+      allow read: if active() &&
+        (resource.data.toUserId == request.auth.uid || resource.data.toRole == profile().role);
+      allow create: if active() &&
+        (request.resource.data.toUserId == request.auth.uid ||
+         request.resource.data.toRole == profile().role || isAdmin() || isHR() || isCOO());
+      allow update: if active() &&
+        (resource.data.toUserId == request.auth.uid || resource.data.toRole == profile().role) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']) &&
+        request.resource.data.read is bool;
+      allow delete: if false;
+    }
+    match /passwordResets/{id} {
+      allow read: if isAdmin();
+      allow create, update, delete: if false;
+    }
+    match /chats/{threadId}/messages/{messageId} {
+      function staffThread() {
+        return isStaff() &&
+          threadId.matches('^(Log Yard|Sawmill|Saw Shop|Workshop|Charcoal|Kindry|Chainsaw|Security|Administration|HR)\\|\\|' + profile().role + '$');
+      }
+      function ownDepartmentThread() {
+        return isDeptHead() &&
+          (threadId == profile().dept + '||admin' ||
+           threadId == profile().dept + '||hr' ||
+           threadId == profile().dept + '||coo');
+      }
+      allow read: if staffThread() || ownDepartmentThread();
+      allow create: if (staffThread() || ownDepartmentThread()) &&
+        request.resource.data.text is string && request.resource.data.text.size() <= 5000 &&
+        validDept(request.resource.data.dept) && request.resource.data.role == profile().role;
+      allow update: if (staffThread() || ownDepartmentThread()) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']) &&
+        request.resource.data.read is bool;
+      allow delete: if false;
+    }
+    match /receipts/{id} {
+      allow read: if isAdmin() || isHR() || isCOO() || (active() && resource.data.dept == profile().dept);
+      allow create: if active() && request.resource.data.dept == profile().dept &&
+        request.resource.data.recordedBy is string;
+      allow update: if (isAdmin() || isHR() || (active() && resource.data.dept == profile().dept)) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['imageUrl']);
+      allow delete: if false;
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}
