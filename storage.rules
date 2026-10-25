@@ -1,0 +1,51 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() { return request.auth != null; }
+    function profilePath() {
+      return /databases/(default)/documents/users/$(request.auth.uid);
+    }
+    function active() {
+      return signedIn() &&
+        firestore.exists(profilePath()) &&
+        firestore.get(profilePath()).data.disabled != true;
+    }
+    function admin() {
+      return active() &&
+        firestore.get(profilePath()).data.role == 'admin' &&
+        firestore.get(profilePath()).data.approved == true;
+    }
+    function hr() {
+      return active() && firestore.get(profilePath()).data.role == 'hr';
+    }
+    function coo() {
+      return active() && firestore.get(profilePath()).data.role == 'coo';
+    }
+    function sameDepartmentReceipt(receiptId) {
+      return active() &&
+        firestore.exists(/databases/(default)/documents/receipts/$(receiptId)) &&
+        firestore.get(/databases/(default)/documents/receipts/$(receiptId)).data.dept ==
+          firestore.get(profilePath()).data.dept;
+    }
+
+    match /settings/logo.jpg {
+      allow read: if active();
+      allow create, update: if admin() &&
+        request.resource.size < 5 * 1024 * 1024 &&
+        request.resource.contentType.matches('image/(jpeg|png|webp)');
+      allow delete: if admin();
+    }
+
+    match /receipts/{receiptId}.jpg {
+      allow read: if admin() || hr() || coo() || sameDepartmentReceipt(receiptId);
+      allow create, update: if (admin() || hr() || sameDepartmentReceipt(receiptId)) &&
+        request.resource.size < 10 * 1024 * 1024 &&
+        request.resource.contentType.matches('image/(jpeg|png|webp)');
+      allow delete: if false;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
