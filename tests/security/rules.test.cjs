@@ -93,12 +93,20 @@ test.beforeEach(async () => {
   });
 });
 
-function asUser(uid) {
-  return env.authenticatedContext(uid).firestore();
+function asUser(uid, claims = { sessionVersion: 0 }) {
+  return env.authenticatedContext(uid, claims).firestore();
 }
 function asAnonymous() {
   return env.unauthenticatedContext().firestore();
 }
+
+test("session-version claims revoke a stale authenticated session", async () => {
+  await env.withSecurityRulesDisabled(async context => {
+    await updateDoc(doc(context.firestore(), "users", "yard-head"), { sessionVersion: 1 });
+  });
+  await assertFails(getDoc(doc(asUser("yard-head", { sessionVersion: 0 }), "users", "yard-head")));
+  await assertSucceeds(getDoc(doc(asUser("yard-head", { sessionVersion: 1 }), "users", "yard-head")));
+});
 
 test("unauthenticated and ordinary users cannot read private credential material", async () => {
   await assertFails(getDoc(doc(asAnonymous(), "userCredentials", "yard-head")));
