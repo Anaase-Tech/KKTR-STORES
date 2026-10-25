@@ -45,10 +45,23 @@ jobs:
         run: npm test
       - name: Build with CI lint enforcement enabled
         run: npm run build
-      - name: Set up Node.js 22 for Cloud Functions
+      - name: Set up Node.js 22 for backend and emulator tests
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Generate Security Tests lockfile
+        run: npm --prefix tests/security install --package-lock-only --ignore-scripts --no-audit
+      - name: Clean-install Security Tests dependencies
+        run: npm --prefix tests/security ci --ignore-scripts
+      - name: Test Firestore rules in the local emulator
+        run: npx --yes firebase-tools@15.30.2 emulators:exec --project demo-kktr-rules --only firestore "npm --prefix tests/security test"
+      - name: Upload Security Tests lockfile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kktr-security-tests-lockfile
+          path: tests/security/package-lock.json
+          retention-days: 7
       - name: Generate Functions lockfile using pinned versions
         run: npm --prefix functions install --package-lock-only --ignore-scripts --no-audit
       - name: Clean-install Functions dependencies
