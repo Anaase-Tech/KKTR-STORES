@@ -210,15 +210,6 @@ function queueOfflineStock(payload) {
   return id;
 }
 
-function queueStockOperation(op){
-  const q=JSON.parse(localStorage.getItem(STOCK_QUEUE_KEY)||"[]");
-  const id=op.id||createQueueId("stock-tx");
-  if(!q.some(item=>item.id===id))
-    q.push({...op,id,queuedAt:Date.now()});
-  localStorage.setItem(STOCK_QUEUE_KEY,JSON.stringify(q));
-  return id;
-}
-
 async function syncOfflineStock() {
   try {
     if(!navigator.onLine) return;
