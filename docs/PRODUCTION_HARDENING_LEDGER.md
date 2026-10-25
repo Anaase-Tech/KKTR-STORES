@@ -5,7 +5,7 @@
 - **Baseline:** main at commit b0b13f924cadb42222f6b6315d717b365a1d6a27
 - **Working branch:** hardening/phase-1-auth-pwa-ci
 - **Started:** 25 October 2026 (Africa/Accra, UTC+0)
-- **Status:** Phase-one branch CI-validated on commit 68030a241714129a8351ce4039858d1f1d75a667; **not approved for production deployment**.
+- **Status:** Branch CI-validated on commit 9b8094ca1aef4f45b832e1c104fc8ab5ae66b37e; 12 static guardrail tests pass and production build passes; **not approved for production deployment**.
 
 ## Operating rule
 
@@ -22,11 +22,13 @@ No feature is called production-ready because a screen exists or a local write a
 | 2026-10-25 | src/index.js and src/App.js | Removed code that unregistered the service worker after public/index.html registered it. | The registration/unregistration conflict prevented reliable PWA/offline-shell behavior. | Guardrail test added. Real-device offline testing is still required. |
 | 2026-10-25 | public/sw.js | Replaced stale logo/favicon cache paths with the actual icon192.png and icon512.png assets; rotated cache namespace. | The former cache.addAll list referenced files absent from public/, so one miss could prevent the shell list from caching. | Guardrail test checks the assets exist. Offline cold-start must still be tested on the deployed origin. |
 | 2026-10-25 | .env, .gitignore, build/ | Removed the tracked environment file that disabled the ESLint plugin, ignored future local environment files/generated build output, and removed stale compiled output/source map from source control. | Production builds must not silently bypass linting; deploys should build from source rather than use a stale committed bundle. | CI workflow runs with CI=true and locked dependencies. Build result must be reviewed before merge. |
-| 2026-10-25 | tests/production-guardrails.test.cjs and .github/workflows/quality-gate.yml | Added regression checks and a pull-request quality gate that installs from the lockfile, runs tests, and builds with CI lint enforcement. | Repeatable checks are required to prevent known defects from returning unnoticed. | 11 source guardrail tests cover the known hardening defects; they are not an integration/security test suite. CI caught the lockfile mismatch and the undefined chat toast that had been hidden while ESLint was disabled. |
+| 2026-10-25 | tests/production-guardrails.test.cjs and .github/workflows/quality-gate.yml | Added 12 static regression checks and a pull-request quality gate that runs clean installation, dependency audit capture, tests, and build with CI lint enforcement. | Repeatable checks are required to prevent known defects from returning unnoticed. | Run 40193140852 passed on commit 9b8094ca1aef4f45b832e1c104fc8ab5ae66b37e. The audit JSON files are uploaded as a short-retention workflow artifact. These are not Firebase integration/security tests. |
 
 | 2026-10-25 | src/App.js — ChatThread and offline outbox | Added an actual toast state for chat access guards, stable message IDs, repeatable setDoc writes, and queue retention after failed sync attempts. | The old undefined showToast blocked production compilation, and the old chat queue could discard every queued message when one write failed. | Guardrails assert stable IDs and retention. CI build and real connection-loss testing are still required. |
 | 2026-10-25 | src/App.js — lubricant transaction handler and stock outbox | Prevented lubricant stock from being shown as issued/restocked offline when the Firestore transaction never committed; made new-item/ledger queue retries preserve failures and use stable document IDs. | A ledger-only queued record and optimistic balance would create false inventory state. | Guardrails assert offline stock is not falsely confirmed. Online transaction/ledger atomicity remains open. |
 | 2026-10-25 | src/App.js — AttendanceModule.submitWeekly | The weekly chop-money calculation now counts only HR-approved present days, checks legacy same-week submissions, and uses a deterministic document ID guarded by a Firestore transaction. | Prevent payments being computed from pending attendance and reduce duplicate weekly submissions. | Static guardrail added; integration verification against real records/rules still required. |
+
+| 2026-10-25 | scripts/summarize-npm-audit.cjs and .github/workflows/quality-gate.yml | Added full and `--omit=dev` npm audit JSON capture, a human-readable summary, and a downloadable audit artifact. | Security risks must be visible and reviewed instead of suppressed or guessed. | Run 40193140852 reported 65 findings (10 low, 18 moderate, 34 high, 3 critical) in both summaries. The equal counts arise because `react-scripts`/Create React App is listed under production dependencies; they are not evidence that every finding affects shipped client code. Advisory triage and migration off the obsolete build tool remain open. |
 
 ## Production blockers still open
 
@@ -44,13 +46,14 @@ These are not claimed to be fixed in phase one. Each must be closed with code, r
 ### P0 — Build and release evidence
 
 - This branch has not been merged or deployed.
-- GitHub Actions run 40192689521 passed on commit 68030a241714129a8351ce4039858d1f1d75a667: npm ci, all 11 regression guardrail tests, and the production build with CI=true and ESLint enforcement. See https://github.com/Anaase-Tech/KKTR-STORES/actions/runs/40192689521. This is a CI build result, not a Firebase integration test or a production deployment acceptance test.
+- GitHub Actions run 40193140852 passed on commit 9b8094ca1aef4f45b832e1c104fc8ab5ae66b37e: `npm ci`, the 12 regression guardrail tests, both audit reports/artifact upload, and `npm run build` with `CI=true` and ESLint enforcement. See https://github.com/Anaase-Tech/KKTR-STORES/actions/runs/40193140852. This is a CI build result, not a Firebase integration test or production acceptance test.
 - Earlier CI runs exposed a stale TypeScript lockfile entry, an undefined showToast reference, unused variables/imports, and a mixed-operator warning. The lock and source were repaired rather than bypassing lint. Keep the quality gate enabled.
 
 ### P1 — Dependency supply-chain risk
 
-- The successful CI dependency installation reported 65 package vulnerabilities across the installed dependency tree: 10 low, 18 moderate, 34 high, and 3 critical. This count is not yet triaged by production reachability and does not establish that every advisory affects deployed browser code, but it is a release blocker until reviewed.
-- Run and record a complete npm audit advisory review, distinguish build-only from shipped dependencies, identify the exact vulnerable packages and available non-breaking fixes, then upgrade and retest. Do not use npm audit fix --force blindly or suppress the report. Re-run audit after remediation and document any risk that remains accepted by the project owner.
+- CI run [40193140852](https://github.com/Anaase-Tech/KKTR-STORES/actions/runs/40193140852) reported 65 findings (10 low, 18 moderate, 34 high, 3 critical). The same count appeared in `npm audit --omit=dev` because this repository lists `react-scripts` under production `dependencies`, so the omit flag does not remove it. This does **not** prove all vulnerabilities are exploitable in browser runtime; it shows the dependency tree needs an explicit, package-by-package triage.
+- The direct `react-scripts` dependency is a high severity root for multiple transitive findings and the recommended fix from npm requires a major toolchain change. Create React App is deprecated. The next remediation should migrate the build pipeline to a maintained toolchain such as Vite in a separate checked stage, regenerate the lockfile on a network-enabled runner, and preserve current PWA behavior. Do not run `npm audit fix --force`, downgrade the audit gate, or treat toolchain migration as complete until build and browser smoke tests pass.
+- The audit artifact has a seven-day retention policy; download it from the workflow run for the full advisory listing. Re-run audit after remediation and document any residual risk explicitly.
 
 ### P1 — Offline inventory integrity and queued writes
 
